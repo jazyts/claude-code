@@ -87,6 +87,15 @@ def _normalize_lines(conn, lines):
     return result
 
 
+def validate_lines(conn, lines):
+    """登録せずに仕訳行を検証・正規化する（取込のプレビュー用）。"""
+    return _normalize_lines(conn, lines)
+
+
+def check_open(conn, year):
+    _check_open(conn, year)
+
+
 def _snapshot(conn, entry_id):
     e = conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     lines = conn.execute(

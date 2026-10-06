@@ -12,7 +12,9 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import ctax, db, ledger, reports, yearend
+import base64
+
+from . import ctax, db, importer, ledger, reports, yearend
 
 E = html.escape
 LINE_ROWS = 8
@@ -43,7 +45,7 @@ NAV = [
     ("/", "ホーム"), ("/entry/new", "仕訳入力"), ("/entries", "仕訳検索"),
     ("/reports/journal", "仕訳帳"), ("/reports/ledger", "総勘定元帳"), ("/reports/trial", "試算表"),
     ("/reports/pl", "決算書"), ("/reports/ctax", "消費税"), ("/yearend", "決算整理"),
-    ("/settings", "設定"),
+    ("/import", "取込"), ("/settings", "設定"),
 ]
 
 # 簡単入力テンプレート: (ラベル, [(side, 科目名, 税区分 or None)], 摘要)
@@ -211,6 +213,7 @@ def make_handler(app):
 <li>帳簿: <a href="/reports/journal">仕訳帳</a> / <a href="/reports/ledger">総勘定元帳</a> / <a href="/reports/trial">試算表</a></li>
 <li>決算: <a href="/reports/pl">損益計算書</a> / <a href="/reports/bs">貸借対照表</a> / <a href="/reports/monthly">月別売上・仕入</a> / <a href="/reports/depr">減価償却費の計算</a> / <a href="/reports/ctax">消費税</a></li>
 <li>準備・整理: <a href="/opening">期首残高</a> / <a href="/assets">固定資産</a> / <a href="/yearend">決算整理・年次繰越</a></li>
+<li>まとめて入力: <a href="/import">Excel・CSVから仕訳・期首残高を取込</a></li>
 <li>管理: <a href="/accounts">勘定科目</a> / <a href="/settings">設定</a> / <a href="/verify">データ検証</a> / <a href="/audit">変更ログ</a> / CSV出力（<a href="/export/journal.csv?y={self.year}">仕訳帳</a>・<a href="/export/history.csv">訂正削除履歴</a>）</li>
 </ul>"""
             self.ok(self.page("ホーム", body))
@@ -407,7 +410,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
                     date_from=q.get("from"), date_to=q.get("to"),
                     amount_min=q.get("min"), amount_max=q.get("max"),
                     partner=q.get("partner"), account=q.get("account"), text=q.get("text"),
-                    include_deleted=bool(q.get("deleted")))
+                    include_deleted=bool(q.get("deleted")), source=q.get("source") or None)
                 err = None
             except (ledger.LedgerError, ValueError) as exc:
                 items, err = [], str(exc)
@@ -773,6 +776,88 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
             self._csv(f"仕訳帳_{self.year}.csv",
                       ["No", "日付", "取引先", "摘要", "貸借", "科目コード", "勘定科目", "金額", "税区分", "インボイス", "メモ"], rows)
 
+        # ---------------------------------------------------------- 取込
+        def get_import(self, err=None):
+            prompt = importer.claude_prompt(self.c)
+            body = f"""<p>Excel（.xlsx）または CSV から、仕訳と期首残高をまとめて取り込みます。取り込む前に内容を確認する画面が出ます。</p>
+<ol><li><a href="/import/template.xlsx">取込用テンプレート（Excel）をダウンロード</a> — 「仕訳」「期首残高」「勘定科目一覧」シート入り。<b>記入例の行は消してから</b>使ってください</li>
+<li>テンプレートに入力するか、下の依頼文と一緒に通帳・領収書・前年の決算書などを Claude に渡して Excel を作ってもらう</li>
+<li>できたファイルを選んで「内容を確認」</li></ol>
+<form method="post" id="up">{self.hidden()}<input type="hidden" name="action" value="preview">
+<input type="hidden" name="data" id="data"><input type="hidden" name="filename" id="fname">
+<div class="row"><input type="file" id="file" accept=".xlsx,.csv" required><button>内容を確認</button></div>
+<p class="muted">期首残高は {self.year} 年（画面右上の年度）の期首残高として登録されます。</p></form>
+<h2>Claude への依頼文</h2>
+<p class="muted">コピーして、通帳の明細・領収書・前年の青色申告決算書など（マイナンバー等は塗りつぶして）と一緒に Claude に渡してください。</p>
+<textarea id="prompt" rows="16" style="width:100%">{E(prompt)}</textarea>
+<button type="button" class="sub" onclick="navigator.clipboard.writeText(document.getElementById('prompt').value);this.textContent='コピーしました'">依頼文をコピー</button>
+<script>
+document.getElementById('up').addEventListener('submit',e=>{{const f=document.getElementById('file').files[0];
+if(!f)return;if(document.getElementById('data').value)return;e.preventDefault();const r=new FileReader();
+r.onload=()=>{{document.getElementById('data').value=r.result.split(',')[1];document.getElementById('fname').value=f.name;e.target.submit();}};
+r.readAsDataURL(f);}});
+</script>"""
+            self.ok(self.page("Excel・CSVの取込", body, err=err))
+
+        def post_import(self):
+            data_b64 = self.form.get("data", "")
+            filename = self.form.get("filename", "")
+            try:
+                data = base64.b64decode(data_b64)
+                if not data:
+                    raise importer.ImportError_("ファイルを選んでください")
+                parsed = importer.parse(self.c, data, filename)
+                if self.form.get("action") == "commit":
+                    if parsed.get("already_imported") and not self.form.get("force"):
+                        raise importer.ImportError_("このファイルは取り込み済みです（もう一度取り込む場合はチェックを入れてください）")
+                    ids = importer.commit(self.c, parsed, self.year,
+                                          skip_duplicates=bool(self.form.get("skip_dup")),
+                                          auto_capital=bool(self.form.get("auto_capital")))
+                    msg = f"{len(ids)} 件の仕訳を取り込みました"
+                    if parsed["opening"] is not None:
+                        msg += f"。{self.year}年の期首残高を登録しました"
+                    body = '<p><a href="/entries?source=import">取り込んだ仕訳</a> / <a href="/reports/journal">仕訳帳</a> / <a href="/opening">期首残高</a> / <a href="/">ホーム</a></p>'
+                    return self.ok(self.page("取込完了", body, msg=msg))
+            except (importer.ImportError_, ledger.LedgerError, ValueError) as exc:
+                return self.get_import(err=str(exc))
+            self.ok(self.import_preview(parsed, data_b64, filename))
+
+        def import_preview(self, parsed, data_b64, filename):
+            amap = db.account_map(self.c)
+            errors = "".join(f"<li>{E(where)}: {E(msg)}</li>" for where, msg in parsed["errors"])
+            warnings = "".join(f"<li>{E(w)}</li>" for w in parsed["warnings"])
+            items = []
+            for i, e in enumerate(parsed["entries"]):
+                lines = [dict(l, account_code=l["account"], account_name=amap[l["account"]]["name"]) for l in e["lines"]]
+                items.append({"entry": {"id": 0, "entry_no": i + 1, "date": e["date"], "partner": e["partner"],
+                                        "description": e["description"] + (f"（{e['label']}）" if e["label"] else ""),
+                                        "deleted": 0}, "lines": lines})
+            body = f'<p>ファイル: {E(filename)} ／ 仕訳 {len(parsed["entries"])} 件</p>'
+            if errors:
+                body += f'<div class="msg err"><b>エラー（修正してから選び直してください）</b><ul>{errors}</ul></div>'
+            if warnings:
+                body += f'<div class="msg err" style="background:#fffaeb;color:#93370d;border-color:#fedf89"><b>確認</b><ul>{warnings}</ul></div>'
+            if parsed["opening"] is not None:
+                rows = "".join(f'<tr><td>{E(amap[c]["name"])}</td><td class="n">{v:,}</td></tr>' for c, v in parsed["opening"].items())
+                body += f'<h2>{self.year}年の期首残高（現在の期首残高は置き換えられます）</h2><table style="max-width:420px"><tr><th>科目</th><th class="n">金額</th></tr>{rows}</table>'
+            if items:
+                debit = sum(l["amount"] for it in items for l in it["lines"] if l["side"] == "D")
+                body += f"<h2>仕訳（借方合計 {debit:,} 円）</h2>" + self.entry_table(items, show_link=False)
+            if not parsed["errors"] and (items or parsed["opening"] is not None):
+                force = ('<label><input type="checkbox" name="force" value="1"> 取り込み済みでも、もう一度取り込む</label><br>'
+                         if parsed.get("already_imported") else "")
+                body += f"""<form method="post" class="noprint">{self.hidden()}<input type="hidden" name="action" value="commit">
+<input type="hidden" name="data" value="{E(data_b64)}"><input type="hidden" name="filename" value="{E(filename)}">
+<label><input type="checkbox" name="skip_dup" value="1" checked> 登録済みと同じ仕訳は取り込まない</label><br>
+<label><input type="checkbox" name="auto_capital" value="1" checked> 元入金を自動計算する（資産 − 負債）</label><br>{force}<br>
+<button>この内容で取り込む</button> <a class="btn sub" href="/import">やめる</a></form>"""
+            return self.page("取込内容の確認", body)
+
+        def get_import_template(self):
+            self._send(HTTPStatus.OK, importer.template(self.c),
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       {"Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote("仕訳取込テンプレート.xlsx")})
+
         def get_export_history(self):
             rows = [[r["id"], r["entry_id"], r["version"], r["op"], r["reason"], r["recorded_at"], r["snapshot"], r["hash"]]
                     for r in self.c.execute("SELECT * FROM entry_history ORDER BY id")]
@@ -807,6 +892,8 @@ ROUTES = [
     (r"/audit", "audit"),
     (r"/export/journal\.csv", "export_journal"),
     (r"/export/history\.csv", "export_history"),
+    (r"/import", "import"),
+    (r"/import/template\.xlsx", "import_template"),
 ]
 
 
