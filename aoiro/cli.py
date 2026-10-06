@@ -16,6 +16,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
     p = sub.add_parser("serve", help="ブラウザ画面を起動する（既定）")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--open", action="store_true", help="起動後にブラウザで画面を開く")
     p = sub.add_parser("backup", help="帳簿データをバックアップする")
     p.add_argument("dest", nargs="?", help="保存先ファイル（既定: backups/日時.sqlite3）")
     sub.add_parser("verify", help="訂正削除履歴の改ざん・不整合を検証する")
@@ -40,4 +41,4 @@ def main(argv=None):
         print("問題は見つかりませんでした" if not problems else f"{len(problems)} 件の問題があります")
         sys.exit(1 if problems else 0)
     else:
-        web.serve(args.db, port=getattr(args, "port", 8765))
+        web.serve(args.db, port=getattr(args, "port", 8765), open_browser=getattr(args, "open", False))

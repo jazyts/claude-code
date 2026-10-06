@@ -6,7 +6,9 @@ import io
 import json
 import re
 import secrets
+import threading
 import urllib.parse
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -808,11 +810,22 @@ ROUTES = [
 ]
 
 
-def serve(db_path, host="127.0.0.1", port=8765):
+def serve(db_path, host="127.0.0.1", port=8765, open_browser=False):
+    url = f"http://{host}:{port}/"
     app = App(db_path)
     db.connect(db_path).close()
-    server = ThreadingHTTPServer((host, port), make_handler(app))
-    print(f"青色申告 会計ソフトを起動しました: http://{host}:{port}/  （終了は Ctrl+C）")
+    try:
+        server = ThreadingHTTPServer((host, port), make_handler(app))
+    except OSError:
+        # すでに起動している場合は画面を開くだけにする
+        print(f"ポート {port} は使用中です。すでに起動している可能性があります: {url}")
+        if open_browser:
+            webbrowser.open(url)
+        return
+    print(f"青色申告 会計ソフトを起動しました: {url}")
+    print("この画面を閉じると終了します（Ctrl+C でも終了できます）。")
+    if open_browser:
+        threading.Timer(0.5, webbrowser.open, (url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
