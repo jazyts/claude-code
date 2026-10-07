@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests on Windows
+        run: python -m unittest discover -s tests
+      - name: Build aoiro.exe
+        run: |
+          python -m pip install "pyinstaller==6.*"
+          python -m aoiro.icon aoiro.ico
+          pyinstaller --onefile --noconsole --name aoiro --icon aoiro.ico aoiro_app.py
+      - name: Smoke test the exe
+        run: python tools/smoke_exe.py dist/aoiro.exe
+      - name: Checksum
+        run: python -c "import hashlib; d=open('dist/aoiro.exe','rb').read(); open('dist/aoiro.exe.sha256','w').write(hashlib.sha256(d).hexdigest() + '  aoiro.exe\n')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aoiro-windows
+          path: |
+            dist/aoiro.exe
+            dist/aoiro.exe.sha256
+      - name: Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/release.py
