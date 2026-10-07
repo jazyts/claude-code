@@ -437,9 +437,24 @@ def handle(conn, msg):
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+def _std_streams():
+    """標準入出力。Windows のウィンドウ版 exe では sys.stdin が None なので OS のハンドルから開く。"""
+    if sys.stdin is not None and sys.stdout is not None:
+        return sys.stdin.buffer, sys.stdout.buffer
+    import ctypes
+    import msvcrt
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetStdHandle.restype = ctypes.c_void_p
+    fin = msvcrt.open_osfhandle(kernel32.GetStdHandle(-10), os.O_RDONLY | os.O_BINARY)
+    fout = msvcrt.open_osfhandle(kernel32.GetStdHandle(-11), os.O_WRONLY | os.O_BINARY)
+    return os.fdopen(fin, "rb", buffering=0), os.fdopen(fout, "wb", buffering=0)
+
+
 def serve(db_path, stdin=None, stdout=None):
-    stdin = stdin or sys.stdin.buffer
-    stdout = stdout or sys.stdout.buffer
+    if stdin is None or stdout is None:
+        stdin, stdout = _std_streams()
+    from . import maintenance
+    scheduler = maintenance.SummaryScheduler(db_path, delay=3.0)
     conn = db.connect(db_path)
     try:
         for raw in stdin:
@@ -452,11 +467,14 @@ def serve(db_path, stdin=None, stdout=None):
                 resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
             else:
                 resp = handle(conn, msg)
+                if msg.get("method") == "tools/call" and (msg.get("params") or {}).get("name") in WRITE_TOOLS:
+                    scheduler.touch()  # スマホ用サマリーを作り直す
             if resp is not None:
                 stdout.write(json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n")
                 stdout.flush()
     finally:
         conn.close()
+        scheduler.flush()
 
 
 def config_path():
@@ -498,11 +516,13 @@ def install(db_path, path=None):
         backup = path + f".bak-{datetime.datetime.now():%Y%m%d%H%M%S}"
         with open(backup, "w", encoding="utf-8") as f:
             f.write(text)
-    config.setdefault("mcpServers", {})["aoiro"] = {
-        "command": sys.executable,
-        "args": ["-m", "aoiro", "--db", os.path.abspath(db_path), "mcp"],
-        "env": {"PYTHONPATH": package_dir, "PYTHONUTF8": "1"},
-    }
+    if getattr(sys, "frozen", False):  # Windows アプリ版（aoiro.exe）
+        entry = {"command": sys.executable, "args": ["--db", os.path.abspath(db_path), "mcp"],
+                 "env": {"PYTHONUTF8": "1"}}
+    else:
+        entry = {"command": sys.executable, "args": ["-m", "aoiro", "--db", os.path.abspath(db_path), "mcp"],
+                 "env": {"PYTHONPATH": package_dir, "PYTHONUTF8": "1"}}
+    config.setdefault("mcpServers", {})["aoiro"] = entry
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)

@@ -3,3 +3,8 @@ __pycache__/
 *.sqlite3
 *.sqlite3-*
 backups/
+dist/
+build/
+*.spec
+aoiro.ico
+release-notes.md

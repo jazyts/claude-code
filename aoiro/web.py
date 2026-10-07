@@ -5,16 +5,19 @@ import csv
 import datetime
 import html
 import io
+import os
 import json
 import re
 import secrets
+import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import ctax, db, importer, invoices, ledger, reports, yearend
+from . import __version__, ctax, db, importer, invoices, ledger, maintenance, paths, reports, updater, yearend
 
 E = html.escape
 LINE_ROWS = 8
@@ -24,7 +27,7 @@ CSS = """
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif;color:var(--fg);background:var(--bg);font-size:14px}
 header{background:#123e7c;color:#fff;padding:8px 16px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
 header a{color:#fff;text-decoration:none;padding:4px 6px;border-radius:4px}header a:hover{background:#ffffff22}
-header .brand{font-weight:700;margin-right:8px}header form{margin-left:auto}
+header .brand{font-weight:700;margin-right:8px}header form{margin-left:auto}header form+form{margin-left:0}
 main{padding:16px;max-width:1200px;margin:0 auto}
 h1{font-size:20px;margin:4px 0 16px}h2{font-size:16px;margin:24px 0 8px}
 table{border-collapse:collapse;width:100%;margin:8px 0}th,td{border:1px solid var(--line);padding:4px 6px;vertical-align:top}
@@ -69,9 +72,15 @@ def yen_blank(v):
 
 
 class App:
-    def __init__(self, db_path):
+    def __init__(self, db_path, desktop=False, notice=None):
         self.db_path = db_path
         self.token = secrets.token_urlsafe(24)
+        self.desktop = desktop
+        self.notice = notice
+        self.server = None
+        self.update_info = None
+        self.last_ping = time.time()
+        self.scheduler = maintenance.SummaryScheduler(db_path)
 
     def conn(self):
         return db.connect(self.db_path)
@@ -120,7 +129,10 @@ def make_handler(app):
                         fn = getattr(self, name, None)
                         if not fn:
                             return self._send(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed", "text/plain")
-                        return fn(*m.groups())
+                        result = fn(*m.groups())
+                        if method == "POST" and handler not in ("year", "quit", "update", "ping"):
+                            app.scheduler.touch()  # スマホ用サマリーを作り直す
+                        return result
                 self._send(HTTPStatus.NOT_FOUND, self.page("見つかりません", "<p>ページがありません。</p>"))
             except Exception as exc:  # noqa: BLE001 ローカル利用のため内容を表示する
                 self._send(HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -158,12 +170,22 @@ def make_handler(app):
             if err:
                 notes += f'<div class="msg err">{E(err)}</div>'
             closed = " （締め済み）" if year in db.closed_years(self.c) else ""
+            if app.notice:
+                notes = f'<div class="msg ok">{E(app.notice)}</div>' + notes
+                app.notice = None
+            if app.update_info:
+                notes = (f'<div class="msg ok noprint">新しい版（{E(app.update_info["version"])}）があります。'
+                         f'<a href="/update">内容を見て更新する</a></div>') + notes
+            quit_btn = (f'<form method="post" action="/quit" onsubmit="return confirm(\'アプリを終了しますか？\')">{self.hidden()}'
+                        f'<button class="sub">終了</button></form>') if app.desktop else ""
+            heartbeat = ("<script>setInterval(()=>fetch('/ping').catch(()=>{}),30000);fetch('/ping').catch(()=>{});</script>"
+                         if app.desktop else "")
             return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{E(title)} - {E(name)}</title>
 <style>{CSS}</style></head><body><header><span class="brand">{E(name)}</span>{nav}
 <form method="post" action="/year">{self.hidden()}<input type="number" name="year" value="{year}" style="width:90px">
-<button class="sub">年度切替</button></form></header>
-<main><h1>{E(title)} <span class="muted" style="font-size:14px">{year}年分{closed}</span></h1>{notes}{body}</main></body></html>"""
+<button class="sub">年度切替</button></form>{quit_btn}</header>
+<main><h1>{E(title)} <span class="muted" style="font-size:14px">{year}年分{closed}</span></h1>{notes}{body}</main>{heartbeat}</body></html>"""
 
         def account_options(self, selected="", blank=True):
             out = ['<option value=""></option>'] if blank else []
@@ -700,7 +722,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
             self.get_yearend(msg=f"{msg}（仕訳 ID {eid}）")
 
         # ---------------------------------------------------------- 設定・科目
-        def get_settings(self, msg=None):
+        def get_settings(self, msg=None, err=None):
             s = lambda k: E(db.get_setting(self.c, k))
             method = db.get_setting(self.c, "tax_method")
             cat = db.get_setting(self.c, "simplified_category")
@@ -716,14 +738,136 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <li>基準期間（2年前）の課税売上高が1,000万円を超える年は消費税の課税事業者です（簡易課税は5,000万円以下で届出が必要）。</li>
 <li>2割特例は免税事業者からインボイス登録で課税事業者になった方向けの経過措置です。基準期間の課税売上高が1,000万円を超える年は使えません。</li>
 <li>控除額の要件は税制改正で変わることがあるので、申告前に国税庁の案内を確認してください。</li></ul>
-<p><a href="/accounts">勘定科目の設定</a></p>"""
-            self.ok(self.page("設定", body, msg=msg))
+<p><a href="/accounts">勘定科目の設定</a></p>""" + self.settings_extra()
+            self.ok(self.page("設定", body, msg=msg, err=err))
 
         def post_settings(self):
-            for key in ("business_name", "owner_name", "tax_method", "simplified_category", "blue_deduction"):
+            for key in ("business_name", "owner_name", "tax_method", "simplified_category", "blue_deduction",
+                        "onedrive_dir"):
                 if key in self.form:
                     db.set_setting(self.c, key, self.form[key].strip())
+            if self.form.get("_onedrive_form"):
+                db.set_setting(self.c, "phone_summary", "1" if self.form.get("phone_summary") else "0")
+                db.set_setting(self.c, "onedrive_backup", "1" if self.form.get("onedrive_backup") else "0")
             self.get_settings(msg="保存しました")
+
+        def settings_extra(self):
+            od_setting = db.get_setting(self.c, "onedrive_dir")
+            detected = paths.detect_onedrive()
+            folder = maintenance.onedrive_folder(self.c)
+            chk = lambda k: "" if db.get_setting(self.c, k) == "0" else " checked"
+            status = (f"保存先: {E(folder)}" if folder else
+                      "OneDrive のフォルダが見つかりません。OneDrive のフォルダの場所を入力してください。")
+            from . import mcp
+            return f"""<h2>スマホで見る・OneDrive</h2>
+<form method="post" action="/settings">{self.hidden()}<input type="hidden" name="_onedrive_form" value="1">
+<div class="row"><label>OneDrive のフォルダ（空欄なら自動: {E(detected or '見つかりません')}）<input name="onedrive_dir" value="{E(od_setting)}" size="50"></label></div>
+<label><input type="checkbox" name="phone_summary" value="1"{chk('phone_summary')}> スマホ用サマリー（売上・経費・未入金など）を OneDrive に自動作成する</label><br>
+<label><input type="checkbox" name="onedrive_backup" value="1"{chk('onedrive_backup')}> 帳簿データのバックアップを OneDrive にも保存する（1日1回・30日分）</label><br>
+<button>保存</button></form>
+<p class="muted">{status}<br>スマホの OneDrive アプリで「aoiro」フォルダの「{maintenance.SUMMARY_NAME}.pdf」を開くと見られます（変更のたびに自動更新）。</p>
+<form method="post" action="/data/summary">{self.hidden()}<button class="sub">今すぐサマリーを作成</button></form>
+<h2>Claude 連携</h2>
+<p>Claude Desktop（パソコン版の Claude アプリ）から、話しかけて仕訳や請求書を操作できるようにします。</p>
+<form method="post" action="/claude/install">{self.hidden()}<button>Claude Desktop に連携を設定する</button></form>
+<p class="muted">設定後、Claude Desktop を完全に終了（タスクトレイのアイコンを右クリック→終了）して起動し直してください。設定ファイル: {E(mcp.config_path())}</p>
+<h2>データ</h2>
+<p>帳簿データの場所: <code>{E(os.path.abspath(app.db_path))}</code>（バージョン {E(__version__)}）</p>
+<form method="post" action="/data/backup" class="row">{self.hidden()}<button class="sub">今すぐバックアップ</button></form>
+<form method="post" action="/data/restore" class="upload row">{self.hidden()}<input type="hidden" name="data"><input type="hidden" name="filename">
+<label>以前の帳簿データ（books.sqlite3）を読み込む<input type="file" accept=".sqlite3,.sqlite,.db" required></label>
+<button class="danger" onclick="return confirm('今の帳簿データを、選んだファイルの内容で置き換えます（今のデータはバックアップされます）。よろしいですか？')">読み込む</button></form>
+<p class="muted">別のフォルダで使っていたデータを引き継ぐときや、バックアップから戻すときに使います。</p>{self.UPLOAD_JS}"""
+
+        def post_data_summary(self):
+            try:
+                path = maintenance.write_summary(app.db_path)
+            except Exception as exc:  # noqa: BLE001
+                return self.get_settings(err=f"作成できませんでした: {exc}")
+            if not path:
+                return self.get_settings(err="OneDrive のフォルダが見つからないか、サマリー作成がオフです")
+            self.get_settings(msg=f"作成しました: {path}")
+
+        def post_data_backup(self):
+            made = maintenance.backup(app.db_path, label=time.strftime("%Y%m%d_%H%M%S"), force=True)
+            self.get_settings(msg="バックアップしました: " + " / ".join(made) if made else None,
+                              err=None if made else "バックアップできませんでした")
+
+        def post_data_restore(self):
+            import tempfile
+            try:
+                data = base64.b64decode(self.form.get("data", ""))
+            except ValueError:
+                data = b""
+            fd, tmp = tempfile.mkstemp(suffix=".sqlite3")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                if not paths.is_ledger_file(tmp):
+                    return self.get_settings(err="このソフトの帳簿データ（books.sqlite3）ではありません")
+                maintenance.backup(app.db_path, label="before-restore-" + time.strftime("%Y%m%d_%H%M%S"), force=True)
+                self.c.close()
+                paths.copy_db(tmp, app.db_path)
+                self.c = app.conn()
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            self.get_settings(msg="帳簿データを読み込みました（以前のデータはバックアップしてあります）")
+
+        def post_claude_install(self):
+            from . import mcp
+            try:
+                done = mcp.install_all(app.db_path)
+            except Exception as exc:  # noqa: BLE001 設定ファイルが壊れている場合など
+                return self.get_settings(err=f"設定できませんでした: {exc}")
+            self.get_settings(msg="Claude Desktop に設定しました。Claude Desktop を完全に終了して起動し直してください（" + " / ".join(done) + "）")
+
+        # ---------------------------------------------------------- デスクトップアプリ
+        def get_favicon(self):
+            from . import icon
+            self._send(HTTPStatus.OK, icon.favicon(), "image/x-icon", {"Cache-Control": "max-age=86400"})
+
+        def get_ping(self):
+            app.last_ping = time.time()
+            self._send(HTTPStatus.OK, "ok", "text/plain")
+
+        def post_quit(self):
+            self.ok("<!doctype html><meta charset=utf-8><title>終了</title><p style='font-family:sans-serif;padding:2em'>"
+                    "終了しました。このウィンドウを閉じてください。</p><script>setTimeout(()=>window.close(),500)</script>")
+            app.scheduler.flush()
+            threading.Timer(0.5, app.server.shutdown).start()
+
+        def get_update(self, err=None):
+            info = app.update_info or updater.check_latest()
+            if not info:
+                return self.ok(self.page("更新", f"<p>最新の版（{E(__version__)}）です。</p>", err=err))
+            app.update_info = info
+            if updater.can_self_update():
+                action = f"""<form method="post" action="/update">{self.hidden()}<button>今すぐ更新する</button></form>
+<p class="muted">更新の前に帳簿データを自動でバックアップします。更新後、アプリが自動で開き直します。</p>"""
+            else:
+                action = f'<p><a class="btn" href="{E(info["page"])}" target="_blank">ダウンロードページを開く</a></p>'
+            body = f"""<p>現在 {E(__version__)} → 新しい版 <b>{E(info['version'])}</b></p>
+<pre style="white-space:pre-wrap;background:var(--soft);padding:8px">{E(info['notes'])}</pre>{action}"""
+            self.ok(self.page("更新", body, err=err))
+
+        def post_update(self):
+            info = app.update_info or updater.check_latest()
+            if not info:
+                return self.redirect("/update")
+            try:
+                maintenance.backup(app.db_path, label=f"before-update-{info['version']}", force=True)
+                updater.apply(info, restart_args=["--after-update"])
+            except Exception as exc:  # noqa: BLE001
+                return self.get_update(err=f"更新できませんでした: {exc}")
+            self.ok("""<!doctype html><meta charset=utf-8><title>更新中</title><body style="font-family:sans-serif;padding:2em">
+<p>更新しています…（数十秒かかることがあります）</p><script>
+setTimeout(function poll(){fetch('/ping').then(r=>{if(r.ok)location.href='/';else throw 0}).catch(()=>setTimeout(poll,1500))},4000);
+</script></body>""")
+            app.scheduler.flush()
+            threading.Timer(1.0, app.server.shutdown).start()
 
         def get_accounts(self, err=None, msg=None):
             cats = db.CATEGORY_LABELS
@@ -1288,29 +1432,66 @@ ROUTES = [
     (r"/document/(\d+)", "document"),
     (r"/entry/(\d+)/attach", "entry_attach"),
     (r"/reports/withholding", "withholding"),
+    (r"/ping", "ping"),
+    (r"/favicon\.ico", "favicon"),
+    (r"/quit", "quit"),
+    (r"/update", "update"),
+    (r"/data/summary", "data_summary"),
+    (r"/data/backup", "data_backup"),
+    (r"/data/restore", "data_restore"),
+    (r"/claude/install", "claude_install"),
     (r"/import/template\.xlsx", "import_template"),
 ]
 
 
-def serve(db_path, host="127.0.0.1", port=8765, open_browser=False):
+def _say(message):
+    if sys.stdout:  # Windows のウィンドウ版（exe）では標準出力がない
+        try:
+            print(message)
+        except (OSError, ValueError):
+            pass
+
+
+def _watchdog(app):
+    """デスクトップ版: ウィンドウが閉じられて画面からの通信が途絶えたら終了する。"""
+    while True:
+        time.sleep(30)
+        if time.time() - app.last_ping > 600:
+            app.scheduler.flush()
+            app.server.shutdown()
+            return
+
+
+def _check_update(app):
+    app.update_info = updater.check_latest()
+
+
+def serve(db_path, host="127.0.0.1", port=8765, open_browser=False, desktop=False, notice=None):
     url = f"http://{host}:{port}/"
-    app = App(db_path)
+    app = App(db_path, desktop=desktop, notice=notice)
     db.connect(db_path).close()
     try:
         server = ThreadingHTTPServer((host, port), make_handler(app))
     except OSError:
         # すでに起動している場合は画面を開くだけにする
-        print(f"ポート {port} は使用中です。すでに起動している可能性があります: {url}")
+        _say(f"ポート {port} は使用中です。すでに起動している可能性があります: {url}")
         if open_browser:
             webbrowser.open(url)
         return
-    print(f"青色申告 会計ソフトを起動しました: {url}")
-    print("この画面を閉じると終了します（Ctrl+C でも終了できます）。")
+    app.server = server
+    _say(f"青色申告 会計ソフトを起動しました: {url}")
+    if not desktop:
+        _say("この画面を閉じると終了します（Ctrl+C でも終了できます）。")
     if open_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
+    threading.Thread(target=_check_update, args=(app,), daemon=True).start()
+    if desktop:
+        threading.Thread(target=_watchdog, args=(app,), daemon=True).start()
+    app.scheduler.touch()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        app.scheduler.flush()

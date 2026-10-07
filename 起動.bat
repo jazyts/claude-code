@@ -18,5 +18,5 @@ if not defined PY (
   exit /b 1
 )
 
-%PY% -m aoiro serve --open
+%PY% -m aoiro app
 if errorlevel 1 pause
