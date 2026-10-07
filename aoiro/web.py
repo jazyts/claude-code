@@ -811,6 +811,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
                     values = {"number": inv["number"], "issue_date": inv["issue_date"], "partner": inv["partner"],
                               "honorific": d["honorific"], "due": d["due"], "remarks": d["remarks"],
                               "withholding": d["withholding"], "post_date": d["post_date"],
+                              "show_number": d.get("show_number", False),
                               "revenue_account": d["revenue_account"], "items": d["items"], **d["issuer"]}
                 else:
                     issuer = invoices.issuer_defaults(self.c)
@@ -835,6 +836,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
                       if inv_linked else "")
             body = f"""<form method="post" action="{action}" id="invf">{self.hidden()}
 <div class="row"><label>請求書番号（空欄で自動）<input name="number" value="{v('number')}" style="width:110px"></label>
+<label><span><input type="checkbox" name="show_number" value="1"{' checked' if values.get('show_number') else ''}> 請求書に番号を表示する</span></label>
 <label>発行日<input type="date" name="issue_date" value="{v('issue_date')}" required></label>
 <label>宛先<input name="partner" value="{v('partner')}" size="36" list="partners" required></label>
 <label>敬称<select name="honorific">{self.options({'御中': '御中', '様': '様'}, values.get('honorific') or '御中')}</select></label>
@@ -881,6 +883,7 @@ document.addEventListener('input',calc);document.addEventListener('change',calc)
             values = dict(self.form)
             values["items"] = items
             values["withholding"] = bool(self.form.get("withholding"))
+            values["show_number"] = bool(self.form.get("show_number"))
             return values
 
         def get_invoice_new(self):
@@ -939,7 +942,7 @@ document.addEventListener('input',calc);document.addEventListener('change',calc)
             wh_row = (f'<tr><th>源泉徴収</th><td class="r red">{yen_(-calc["withholding"])}</td></tr>' if calc["withholding"] else "")
             addr = "<br>".join(E(x) for x in iss.get("issuer_address", "").split("\n"))
             regno = f'<div>登録番号：{E(iss["issuer_regno"])}</div>' if iss.get("issuer_regno") else ""
-            number = f'<div>請求書番号　{E(inv["number"])}</div>'
+            number = f'<div>請求書番号　{E(inv["number"])}</div>' if d.get("show_number") else ""
             cancelled = '<div class="stamp">取消</div>' if inv["cancelled"] else ""
             pay = ""
             if not inv["cancelled"]:

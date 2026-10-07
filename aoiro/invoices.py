@@ -149,6 +149,7 @@ def save(conn, form, invoice_id=None, post=True, reason=""):
         "due": (form.get("due") or "").strip() or default_due(issue_date),
         "remarks": (form.get("remarks") or "").strip(),
         "withholding": bool(form.get("withholding")),
+        "show_number": bool(form.get("show_number")),
         "post_date": (form.get("post_date") or "").strip() or issue_date,
         "revenue_account": form.get("revenue_account") or _code(conn, "売上高"),
         "items": calc["items"],

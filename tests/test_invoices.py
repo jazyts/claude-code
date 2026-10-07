@@ -166,8 +166,11 @@ class InvoiceWebTest(unittest.TestCase):
         self.assertIn("/print", url)
         for text in ("株式会社テスト 御中", "¥82,181", "¥-8,408", "¥8,235", "テスト銀行", "山田 太郎"):
             self.assertIn(text, body)
+        self.assertNotIn("請求書番号　", body)  # 既定では番号を表示しない
         iid = url.split("/invoice/")[1].split("/")[0]
         self.assertIn("2026-001", self.get("/invoices"))
+        _, body = self.post(f"/invoice/{iid}", pairs + [("number", "2026-001"), ("show_number", "1"), ("reason", "番号表示")])
+        self.assertIn("請求書番号　2026-001", body)
         self.assertIn("山田 太郎", self.get("/invoice/new"))  # 発行者が次回の既定値になる
         url, body = self.post(f"/invoice/{iid}/paid", [("date", "2026-10-31"), ("received", "82181"), ("fee", "0"),
                                                       ("account", "110")])
