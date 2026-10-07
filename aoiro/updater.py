@@ -84,5 +84,17 @@ def apply(info, restart_args=None):
         os.replace(old, exe)
         raise
     flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([exe] + list(restart_args or []), creationflags=flags, close_fds=True)
+    subprocess.Popen([exe] + list(restart_args or []), creationflags=flags, close_fds=True, env=restart_env())
     return True
+
+
+def restart_env():
+    """新しい exe を「別のアプリ」として起動するための環境変数。
+
+    PyInstaller の exe が自分自身を起動すると、子は親の一時展開フォルダを使い回してしまい、
+    親（更新前の版）の終了と同時にそのフォルダが消えて FileNotFoundError になる。
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("_PYI_") or k.startswith("_MEIPASS"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env

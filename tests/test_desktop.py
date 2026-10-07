@@ -73,6 +73,15 @@ class DesktopTest(unittest.TestCase):
             self.assertIsNone(updater.check_latest())
         self.assertGreater(updater.parse_version("v1.10.0"), updater.parse_version("1.9.9"))
 
+    def test_restart_env_does_not_reuse_parent_bundle(self):
+        with mock.patch.dict(os.environ, {"_MEIPASS2": "C:\\Temp\\_MEI123", "_PYI_APPLICATION_HOME_DIR": "x",
+                                          "PATH": "p"}):
+            env = updater.restart_env()
+        self.assertNotIn("_MEIPASS2", env)
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", env)
+        self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertEqual(env["PATH"], "p")
+
 
 class DesktopWebTest(unittest.TestCase):
     @classmethod
