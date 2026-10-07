@@ -88,6 +88,44 @@ CREATE TABLE IF NOT EXISTS fixed_assets(
     disposed       TEXT                        -- 除却・売却日（任意）
 );
 
+-- 発行した請求書（保存のたびに内容を audit_log に記録）
+CREATE TABLE IF NOT EXISTS invoices(
+    id            INTEGER PRIMARY KEY,
+    number        TEXT NOT NULL,
+    issue_date    TEXT NOT NULL,
+    partner       TEXT NOT NULL,
+    data          TEXT NOT NULL,              -- 明細・発行者・振込先などの JSON
+    subtotal      INTEGER NOT NULL,
+    tax           INTEGER NOT NULL,
+    withholding   INTEGER NOT NULL,
+    total         INTEGER NOT NULL,
+    entry_id      INTEGER REFERENCES entries(id),   -- 売上の仕訳
+    paid_entry_id INTEGER REFERENCES entries(id),   -- 入金の仕訳
+    cancelled     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- 請求書・領収書などの証憑ファイル（変更・削除不可。日付・金額・取引先で検索できる）
+CREATE TABLE IF NOT EXISTS documents(
+    id         INTEGER PRIMARY KEY,
+    entry_id   INTEGER REFERENCES entries(id),
+    kind       TEXT NOT NULL,                 -- 発行請求書 / 受領請求書 など
+    date       TEXT NOT NULL,
+    amount     INTEGER NOT NULL,
+    partner    TEXT NOT NULL DEFAULT '',
+    filename   TEXT NOT NULL,
+    mime       TEXT NOT NULL,
+    sha256     TEXT NOT NULL,
+    data       BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS documents_search ON documents(date, amount, partner);
+CREATE TRIGGER IF NOT EXISTS documents_no_update BEFORE UPDATE ON documents
+BEGIN SELECT RAISE(ABORT, '証憑は変更できません'); END;
+CREATE TRIGGER IF NOT EXISTS documents_no_delete BEFORE DELETE ON documents
+BEGIN SELECT RAISE(ABORT, '証憑は削除できません'); END;
+
 -- 設定・期首残高・科目などの変更ログ（追記のみ）
 CREATE TABLE IF NOT EXISTS audit_log(
     id     INTEGER PRIMARY KEY,
@@ -163,6 +201,18 @@ DEFAULT_SETTINGS = {
     "simplified_category": "5",
     "blue_deduction": "650000",
     "closed_years": "",
+    # 請求書の発行者・振込先
+    "issuer_title": "",
+    "issuer_zip": "",
+    "issuer_address": "",
+    "issuer_tel": "",
+    "issuer_regno": "",
+    "bank_name": "",
+    "bank_branch": "",
+    "bank_account_type": "普通預金",
+    "bank_account_number": "",
+    "bank_account_holder": "",
+    "invoice_note": "振込手数料は御社のご負担にてお願いいたします。",
 }
 
 CATEGORY_LABELS = {

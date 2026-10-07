@@ -1,6 +1,8 @@
 """ブラウザで使う画面（標準ライブラリの http.server のみ使用、ローカル専用）."""
 
+import base64
 import csv
+import datetime
 import html
 import io
 import json
@@ -12,9 +14,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import base64
-
-from . import ctax, db, importer, ledger, reports, yearend
+from . import ctax, db, importer, invoices, ledger, reports, yearend
 
 E = html.escape
 LINE_ROWS = 8
@@ -42,7 +42,7 @@ button.danger{background:var(--bad);border-color:var(--bad)}button.sub,.btn.sub{
 """
 
 NAV = [
-    ("/", "ホーム"), ("/entry/new", "仕訳入力"), ("/entries", "仕訳検索"),
+    ("/", "ホーム"), ("/entry/new", "仕訳入力"), ("/invoices", "請求書"), ("/entries", "仕訳検索"),
     ("/reports/journal", "仕訳帳"), ("/reports/ledger", "総勘定元帳"), ("/reports/trial", "試算表"),
     ("/reports/pl", "決算書"), ("/reports/ctax", "消費税"), ("/yearend", "決算整理"),
     ("/import", "取込"), ("/settings", "設定"),
@@ -213,6 +213,7 @@ def make_handler(app):
 <li>帳簿: <a href="/reports/journal">仕訳帳</a> / <a href="/reports/ledger">総勘定元帳</a> / <a href="/reports/trial">試算表</a></li>
 <li>決算: <a href="/reports/pl">損益計算書</a> / <a href="/reports/bs">貸借対照表</a> / <a href="/reports/monthly">月別売上・仕入</a> / <a href="/reports/depr">減価償却費の計算</a> / <a href="/reports/ctax">消費税</a></li>
 <li>準備・整理: <a href="/opening">期首残高</a> / <a href="/assets">固定資産</a> / <a href="/yearend">決算整理・年次繰越</a></li>
+<li>請求書: <a href="/invoices">請求書の作成・一覧</a> / <a href="/invoices/pdf">請求書PDFから仕訳</a> / <a href="/documents">証憑の検索</a> / <a href="/reports/withholding">源泉徴収の集計</a></li>
 <li>まとめて入力: <a href="/import">Excel・CSVから仕訳・期首残高を取込</a></li>
 <li>管理: <a href="/accounts">勘定科目</a> / <a href="/settings">設定</a> / <a href="/verify">データ検証</a> / <a href="/audit">変更ログ</a> / CSV出力（<a href="/export/journal.csv?y={self.year}">仕訳帳</a>・<a href="/export/history.csv">訂正削除履歴</a>）</li>
 </ul>"""
@@ -323,6 +324,15 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <a class="btn sub" href="/entry/new?date={e['date']}">続けて入力</a></div>
 <form method="post" action="/entry/{e['id']}/delete" class="row noprint">{self.hidden()}
 <label>削除理由（必須）<input name="reason" size="40" required></label><button class="danger">削除</button></form>"""
+            docs = invoices.documents_for_entry(self.c, e["id"])
+            body += "<h2>証憑</h2>" + ("<ul>" + "".join(
+                f'<li><a href="/document/{d["id"]}" target="_blank">{E(d["filename"])}</a>（{E(d["kind"])}・{E(d["created_at"])}）</li>'
+                for d in docs) + "</ul>" if docs else '<p class="muted">なし</p>')
+            if not e["deleted"]:
+                body += f"""<form method="post" action="/entry/{e['id']}/attach" class="upload row noprint">{self.hidden()}
+<input type="hidden" name="data"><input type="hidden" name="filename"><input type="file" accept=".pdf,.png,.jpg,.jpeg" required>
+<select name="kind"><option>領収書等</option><option>受領請求書</option><option>発行請求書</option><option>契約書</option></select>
+<button class="sub">証憑を添付</button></form>{self.UPLOAD_JS}"""
             body += "<h2>訂正・削除履歴</h2>" + self.history_table(int(eid))
             msg = "登録しました" if self.query.get("created") else ("保存しました" if self.query.get("saved") else None)
             self.ok(self.page(f"仕訳 No.{e['entry_no']}{'（削除済み）' if e['deleted'] else ''}", body, msg=msg))
@@ -776,6 +786,377 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
             self._csv(f"仕訳帳_{self.year}.csv",
                       ["No", "日付", "取引先", "摘要", "貸借", "科目コード", "勘定科目", "金額", "税区分", "インボイス", "メモ"], rows)
 
+        # ---------------------------------------------------------- 請求書
+        def get_invoices(self):
+            rows = []
+            for r in invoices.listing(self.c, self.year):
+                status = "取消" if r["cancelled"] else ("入金済" if r["paid_entry_id"] else "未入金")
+                entry = f'<a href="/entry/{r["entry_id"]}">仕訳</a>' if r["entry_id"] else "—"
+                rows.append(f'<tr{" class=deleted" if r["cancelled"] else ""}><td><a href="/invoice/{r["id"]}">{E(r["number"])}</a></td>'
+                            f'<td>{E(r["issue_date"])}</td><td>{E(r["partner"])}</td><td class="n">{r["subtotal"]:,}</td>'
+                            f'<td class="n">{r["tax"]:,}</td><td class="n">{r["withholding"]:,}</td><td class="n">{r["total"]:,}</td>'
+                            f'<td>{status}</td><td>{entry} <a href="/invoice/{r["id"]}/print">印刷</a></td></tr>')
+            body = f"""<div class="row noprint"><a class="btn" href="/invoice/new">請求書を作成</a>
+<a class="btn sub" href="/invoices/pdf">請求書PDFから仕訳を作成</a> <a class="btn sub" href="/documents">証憑の検索</a>
+<a class="btn sub" href="/reports/withholding">源泉徴収の集計</a></div>
+<table><tr><th>番号</th><th>発行日</th><th>宛先</th><th class="n">小計（税抜）</th><th class="n">消費税</th><th class="n">源泉徴収</th>
+<th class="n">ご請求額</th><th>状態</th><th></th></tr>{''.join(rows) or '<tr><td colspan="9" class="muted">この年の請求書はありません</td></tr>'}</table>"""
+            self.ok(self.page("請求書", body))
+
+        def invoice_form(self, action, inv=None, values=None, err=None):
+            today = datetime.date.today().isoformat()
+            if values is None:
+                if inv:
+                    d = inv["data"]
+                    values = {"number": inv["number"], "issue_date": inv["issue_date"], "partner": inv["partner"],
+                              "honorific": d["honorific"], "due": d["due"], "remarks": d["remarks"],
+                              "withholding": d["withholding"], "post_date": d["post_date"],
+                              "revenue_account": d["revenue_account"], "items": d["items"], **d["issuer"]}
+                else:
+                    issuer = invoices.issuer_defaults(self.c)
+                    values = {"issue_date": today, "honorific": "御中", "withholding": True,
+                              "remarks": issuer.get("invoice_note", ""), "items": [{"date": today.replace("-", "/").replace("/0", "/"), "rate": 10}], **issuer}
+            v = lambda k: E(str(values.get(k) or ""))
+            items = list(values.get("items") or [])
+            while len(items) < 15:
+                items.append({})
+            item_rows = "".join(
+                f"""<tr><td><input name="i_date" value="{E(str(it.get('date') or ''))}" style="width:95px"></td>
+<td><input name="i_description" value="{E(str(it.get('description') or ''))}" style="width:100%"></td>
+<td><input name="i_quantity" class="q" value="{E(str(it.get('quantity') or ''))}" style="width:60px;text-align:right"></td>
+<td><input name="i_unit" value="{E(str(it.get('unit') or ''))}" style="width:45px"></td>
+<td><input name="i_unit_price" class="p" value="{E(str(it.get('unit_price') or ''))}" style="width:95px;text-align:right"></td>
+<td><select name="i_rate" class="r">{self.options({'10': '10%', '8': '8%（軽減）', '0': '対象外'}, str(it.get('rate', 10)))}</select></td>
+<td class="n amt"></td></tr>""" for it in items)
+            revenue_opts = "".join(f'<option value="{a["code"]}"{" selected" if a["code"] == values.get("revenue_account") else ""}>{E(a["name"])}</option>'
+                                   for a in db.accounts(self.c, True) if a["category"] == "revenue")
+            inv_linked = inv and inv.get("entry_id")
+            reason = (f'<label>修正理由（売上の仕訳も訂正されます）<input name="reason" size="40" value="{v("reason")}"></label>'
+                      if inv_linked else "")
+            body = f"""<form method="post" action="{action}" id="invf">{self.hidden()}
+<div class="row"><label>請求書番号（空欄で自動）<input name="number" value="{v('number')}" style="width:110px"></label>
+<label>発行日<input type="date" name="issue_date" value="{v('issue_date')}" required></label>
+<label>宛先<input name="partner" value="{v('partner')}" size="36" list="partners" required></label>
+<label>敬称<select name="honorific">{self.options({'御中': '御中', '様': '様'}, values.get('honorific') or '御中')}</select></label>
+<label>振込期日<input name="due" value="{v('due')}" placeholder="空欄なら発行月の月末"></label></div>
+<datalist id="partners">{''.join(f'<option value="{E(r["partner"])}">' for r in self.c.execute("SELECT DISTINCT partner FROM entries WHERE partner != '' ORDER BY partner"))}</datalist>
+<div class="scroll"><table><tr><th>日付</th><th>内容</th><th class="n">数量</th><th>単位</th><th class="n">単価（税抜）</th><th>税率</th><th class="n">金額（税抜）</th></tr>{item_rows}</table></div>
+<div class="row"><label><span><input type="checkbox" name="withholding" value="1" id="wh"{' checked' if values.get('withholding') else ''}> 源泉徴収する（10.21%、100万円超の部分は20.42%）</span></label></div>
+<table style="max-width:360px;margin-left:auto"><tr><th>小計</th><td class="n" id="t_sub"></td></tr><tr><th>消費税</th><td class="n" id="t_tax"></td></tr>
+<tr><th>源泉徴収</th><td class="n" id="t_wh"></td></tr><tr class="total"><th>ご請求金額</th><td class="n" id="t_total"></td></tr></table>
+<label style="display:block">備考<textarea name="remarks" rows="2" style="width:100%">{v('remarks')}</textarea></label>
+<details{'' if values.get('owner_name') and values.get('bank_name') else ' open'}><summary>発行者・振込先</summary>
+<div class="row"><label>肩書<input name="issuer_title" value="{v('issuer_title')}" placeholder="公認会計士"></label>
+<label>氏名<input name="owner_name" value="{v('owner_name')}"></label><label>郵便番号<input name="issuer_zip" value="{v('issuer_zip')}" style="width:100px"></label>
+<label>住所<input name="issuer_address" value="{v('issuer_address')}" size="40"></label><label>電話<input name="issuer_tel" value="{v('issuer_tel')}"></label>
+<label>登録番号（インボイス登録している場合）<input name="issuer_regno" value="{v('issuer_regno')}" placeholder="T1234567890123"></label></div>
+<div class="row"><label>銀行名<input name="bank_name" value="{v('bank_name')}"></label><label>支店名<input name="bank_branch" value="{v('bank_branch')}" placeholder="○○支店(123)"></label>
+<label>預金種別<input name="bank_account_type" value="{v('bank_account_type')}" style="width:90px"></label><label>口座番号<input name="bank_account_number" value="{v('bank_account_number')}" style="width:100px"></label>
+<label>口座名義カナ<input name="bank_account_holder" value="{v('bank_account_holder')}"></label>
+<label>振込に関する注記<input name="invoice_note" value="{v('invoice_note')}" size="40"></label></div>
+<label><input type="checkbox" name="remember" value="1" checked> 次回もこの発行者・振込先を使う</label></details>
+<h2>仕訳</h2><div class="row"><label><span><input type="checkbox" name="post" value="1" checked> 売上の仕訳を作成する</span></label>
+<label>計上日（空欄なら発行日）<input type="date" name="post_date" value="{v('post_date')}"></label>
+<label>売上の科目<select name="revenue_account">{revenue_opts}</select></label>{reason}</div>
+<p class="muted">仕訳: 売掛金（ご請求額）＋ 事業主貸（源泉所得税）／ 売上高（税込）。業務を行った月と発行月がずれ、年をまたぐ場合は計上日を業務の完了日にしてください。</p>
+<button>保存して印刷画面へ</button></form>
+<script>
+const yen=v=>(v<0?'¥-':'¥')+Math.abs(v).toLocaleString();
+function calc(){{let by={{10:0,8:0,0:0}};document.querySelectorAll('#invf tr').forEach(tr=>{{const q=tr.querySelector('.q');if(!q)return;
+const p=tr.querySelector('.p'),r=tr.querySelector('.r'),cell=tr.querySelector('.amt');const qv=parseFloat((q.value||'').replace(/,/g,'')),pv=parseFloat((p.value||'').replace(/,/g,''));
+if(isNaN(qv)||isNaN(pv)){{cell.textContent='';return;}}const a=Math.round(qv*pv+1e-9);by[r.value]+=a;cell.textContent=yen(a);}});
+const sub=by[10]+by[8]+by[0],tax=Math.floor(by[10]*10/100)+Math.floor(by[8]*8/100);let wh=0;
+if(document.getElementById('wh').checked&&sub>0)wh=sub<=1000000?Math.floor(sub*0.1021+1e-9):102100+Math.floor((sub-1000000)*0.2042+1e-9);
+t_sub.textContent=yen(sub);t_tax.textContent=yen(tax);t_wh.textContent=wh?yen(-wh):'—';t_total.textContent=yen(sub+tax-wh);}}
+document.addEventListener('input',calc);document.addEventListener('change',calc);calc();
+</script>"""
+            return self.page("請求書の" + ("修正" if inv else "作成"), body, err=err)
+
+        def _invoice_values(self):
+            fl = self.form_lists
+            keys = ("date", "description", "quantity", "unit", "unit_price", "rate")
+            cols = {k: fl.get("i_" + k, []) for k in keys}
+            n = max((len(c) for c in cols.values()), default=0)
+            items = [{k: (cols[k][i] if i < len(cols[k]) else "") for k in keys} for i in range(n)]
+            values = dict(self.form)
+            values["items"] = items
+            values["withholding"] = bool(self.form.get("withholding"))
+            return values
+
+        def get_invoice_new(self):
+            src = self.query.get("copy")
+            inv = invoices.get(self.c, int(src)) if src else None
+            if inv:
+                d = inv["data"]
+                values = {"issue_date": datetime.date.today().isoformat(), "partner": inv["partner"],
+                          "honorific": d["honorific"], "remarks": d["remarks"], "withholding": d["withholding"],
+                          "revenue_account": d["revenue_account"], "items": d["items"], **invoices.issuer_defaults(self.c)}
+                return self.ok(self.invoice_form("/invoice/new", values=values))
+            self.ok(self.invoice_form("/invoice/new"))
+
+        def post_invoice_new(self):
+            values = self._invoice_values()
+            try:
+                iid = invoices.save(self.c, values, post=bool(self.form.get("post")))
+            except (invoices.InvoiceError, ledger.LedgerError) as exc:
+                return self.ok(self.invoice_form("/invoice/new", values=values, err=str(exc)))
+            self.redirect(f"/invoice/{iid}/print?saved=1")
+
+        def get_invoice(self, iid):
+            inv = invoices.get(self.c, int(iid))
+            if not inv:
+                return self._send(HTTPStatus.NOT_FOUND, self.page("請求書", "<p>見つかりません</p>"))
+            if inv["cancelled"]:
+                return self.redirect(f"/invoice/{iid}/print")
+            self.ok(self.invoice_form(f"/invoice/{iid}", inv=inv))
+
+        def post_invoice(self, iid):
+            inv = invoices.get(self.c, int(iid))
+            values = self._invoice_values()
+            try:
+                invoices.save(self.c, values, int(iid), post=bool(self.form.get("post")), reason=self.form.get("reason"))
+            except (invoices.InvoiceError, ledger.LedgerError) as exc:
+                return self.ok(self.invoice_form(f"/invoice/{iid}", inv=inv, values=values, err=str(exc)))
+            self.redirect(f"/invoice/{iid}/print?saved=1")
+
+        def get_invoice_print(self, iid):
+            inv = invoices.get(self.c, int(iid))
+            if not inv:
+                return self._send(HTTPStatus.NOT_FOUND, self.page("請求書", "<p>見つかりません</p>"))
+            d, iss = inv["data"], inv["data"]["issuer"]
+            calc = invoices.calculate({"items": d["items"], "withholding": d["withholding"]})
+            yen_ = lambda v: ("¥-" if v < 0 else "¥") + f"{abs(v):,}"
+            fmt_date = lambda s: f"{int(s[:4])}/{int(s[5:7])}/{int(s[8:10])}" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s or "") else E(s or "")
+            rows = []
+            for it in d["items"] + [None] * max(0, 15 - len(d["items"])):
+                if it:
+                    rate = "対象外" if it["rate"] == 0 else f'{it["rate"]}%'
+                    rows.append(f'<tr><td class="c">{E(it["date"])}</td><td>{E(it["description"])}</td><td class="c">{"※" if it["rate"] == 8 else ""}</td>'
+                                f'<td class="r">{E(str(it["quantity"]))}</td><td class="c">{E(it["unit"])}</td>'
+                                f'<td class="r">{yen_(it["unit_price"]) if it["unit_price"] != "" else ""}</td><td class="c">{rate}</td><td class="r">{yen_(it["amount"])}</td></tr>')
+                else:
+                    rows.append('<tr>' + '<td>&nbsp;</td>' * 8 + '</tr>')
+            wh_row = (f'<tr><th>源泉徴収</th><td class="r red">{yen_(-calc["withholding"])}</td></tr>' if calc["withholding"] else "")
+            addr = "<br>".join(E(x) for x in iss.get("issuer_address", "").split("\n"))
+            regno = f'<div>登録番号：{E(iss["issuer_regno"])}</div>' if iss.get("issuer_regno") else ""
+            number = f'<div>請求書番号　{E(inv["number"])}</div>'
+            cancelled = '<div class="stamp">取消</div>' if inv["cancelled"] else ""
+            pay = ""
+            if not inv["cancelled"]:
+                if inv["paid_entry_id"]:
+                    pay = f'<p>入金済み（<a href="/entry/{inv["paid_entry_id"]}">入金の仕訳</a>）</p>'
+                else:
+                    asset_opts = "".join(f'<option value="{a["code"]}"{" selected" if a["name"] == "普通預金" else ""}>{E(a["name"])}</option>'
+                                         for a in db.accounts(self.c, True) if a["category"] == "asset")
+                    pay = f"""<form method="post" action="/invoice/{iid}/paid" class="row">{self.hidden()}<b>入金の登録</b>
+<label>入金日<input type="date" name="date" required></label><label>入金額<input type="number" name="received" value="{inv['total']}"></label>
+<label>差し引かれた振込手数料<input type="number" name="fee" value="0" style="width:90px"></label><label>入金口座<select name="account">{asset_opts}</select></label><button>入金を登録</button></form>"""
+            tools = f"""<div class="noprint toolbar"><button onclick="window.print()">印刷 / PDFで保存</button>
+{'' if inv['cancelled'] else f'<a class="btn sub" href="/invoice/{iid}">修正</a>'} <a class="btn sub" href="/invoice/new?copy={iid}">コピーして新規作成</a>
+<a class="btn sub" href="/invoices">一覧へ</a> {f'<a href="/entry/{inv["entry_id"]}">売上の仕訳</a>' if inv['entry_id'] else '（仕訳なし）'}
+{pay}
+{'' if inv['cancelled'] else f'<form method="post" action="/invoice/{iid}/cancel" class="row">{self.hidden()}<label>取消理由<input name="reason" required></label><button class="danger">この請求書を取り消す（仕訳も削除）</button></form>'}
+<p class="muted">印刷画面で「送信先: PDFに保存」を選ぶとPDFになります。「詳細設定」の「背景のグラフィック」にチェックを入れてください。</p></div>"""
+            sheet = f"""<div class="sheet">{cancelled}
+<div class="title">請求書</div>
+<div class="issued">{number}<div>発行日　{fmt_date(inv['issue_date'])}</div></div>
+<div class="head"><div class="left"><div class="to">{E(inv['partner'])} {E(d['honorific'])}</div>
+<p class="lead">下記の通り、ご請求申し上げます。</p>
+<table class="box amount"><tr><th>ご請求金額（税込）</th></tr><tr><td class="r big">{yen_(calc['total'])}</td></tr></table></div>
+<div class="right"><div class="name">{E(iss.get('issuer_title', ''))}　{E(iss.get('owner_name', ''))}</div>
+<div>〒{E(iss.get('issuer_zip', ''))}</div><table class="plain"><tr><td>住所：</td><td>{addr}</td></tr><tr><td>電話：</td><td>{E(iss.get('issuer_tel', ''))}</td></tr></table>{regno}</div></div>
+<table class="box bank"><tr><th rowspan="2">振込先</th><td>振込口座：{E(iss.get('bank_name', ''))}　支店名：{E(iss.get('bank_branch', ''))}　口座番号：{E(iss.get('bank_account_number', ''))}</td></tr>
+<tr><td>預金種別：{E(iss.get('bank_account_type', ''))}　　口座名義カナ：{E(iss.get('bank_account_holder', ''))}</td></tr>
+<tr><th>振込期日</th><td>{E(d['due'])}</td></tr></table>
+<div class="note">{E(iss.get('invoice_note', ''))}</div>
+<table class="items"><tr><th style="width:15%">日付</th><th>内容</th><th style="width:8%">軽減税率</th><th style="width:7%">数量</th><th style="width:6%">単位</th>
+<th style="width:12%">単価（税抜）</th><th style="width:6%">税率</th><th style="width:12%">金額（税抜）</th></tr>{''.join(rows)}</table>
+<div class="foot"><div><div class="small">※は軽減税率対象です。</div><table class="ratetbl"><tr><th>税率区分</th><th>消費税</th><th>金額（税抜）</th></tr>
+<tr><td class="c">10%対象</td><td class="r">{yen_(calc['tax_by_rate'][10])}</td><td class="r">{yen_(calc['by_rate'][10])}</td></tr>
+<tr><td class="c">8%対象</td><td class="r">{yen_(calc['tax_by_rate'][8])}</td><td class="r">{yen_(calc['by_rate'][8])}</td></tr>
+<tr><td class="c">対象外</td><td class="r">{yen_(0)}</td><td class="r">{yen_(calc['by_rate'][0])}</td></tr></table></div>
+<table class="totals"><tr><th>小計</th><td class="r">{yen_(calc['subtotal'])}</td></tr><tr><th>消費税</th><td class="r">{yen_(calc['tax'])}</td></tr>{wh_row}
+<tr><th>合計</th><td class="r">{yen_(calc['total'])}</td></tr></table></div>
+<table class="box remarks"><tr><th>備考</th></tr><tr><td>{E(d['remarks']).replace(chr(10), '<br>')}</td></tr></table></div>"""
+            css = """
+.sheet{width:190mm;min-height:270mm;margin:0 auto;background:#fff;color:#000;font-family:"Yu Gothic","YuGothic","Hiragino Sans","Meiryo",sans-serif;font-size:9.5pt;position:relative;
+-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.sheet table{border-collapse:collapse;width:auto;margin:0}.sheet th,.sheet td{border:1px solid #000;padding:1px 4px;font-weight:normal;background:none}
+.sheet th{background:#000!important;color:#fff;text-align:center;white-space:nowrap}.sheet .r{text-align:right}.sheet .c{text-align:center}
+.title{background:#000;color:#fff;text-align:center;font-size:20pt;letter-spacing:.2em;padding:2px 0}
+.issued{text-align:right;margin:10px 40px 0 0}.head{display:flex;justify-content:space-between;margin-top:10px}
+.head .left{width:52%}.head .right{width:36%;padding-top:24px}.to{font-size:13pt;margin-top:6px}.lead{margin:44px 0 4px}
+.name{font-size:11pt}.plain td{border:none;padding:0 2px;vertical-align:top}.plain td:first-child{white-space:nowrap}
+.amount{width:100%!important}.amount .big{font-size:18pt;padding-right:6px}
+.bank{width:75%;margin-top:14px!important}.bank th{width:56px}.note{margin:2px 0 14px}
+.items{width:100%!important}.items td{height:14px;font-size:8.5pt}
+.foot{display:flex;justify-content:space-between;align-items:flex-start}.small{font-size:8.5pt}
+.ratetbl{width:40%!important;min-width:260px}.totals{width:29%!important;min-width:150px}.totals th{width:45%}
+.red{color:#e00}.remarks{width:100%!important;margin-top:16px!important}.remarks td{height:40px;vertical-align:top}
+.stamp{position:absolute;top:60px;left:40%;border:4px solid #c00;color:#c00;font-size:30pt;padding:4px 20px;transform:rotate(-15deg)}
+.toolbar{max-width:190mm;margin:0 auto 12px}
+@page{size:A4;margin:10mm}
+@media print{body{background:#fff}main{padding:0;max-width:none}h1,.msg{display:none}.sheet{width:auto;min-height:0}}"""
+            msg = "保存しました" if self.query.get("saved") else None
+            html_ = self.page(f"請求書 {inv['number']}", tools + sheet, msg=msg)
+            self.ok(html_.replace("</style>", css + "</style>", 1))
+
+        def post_invoice_paid(self, iid):
+            try:
+                invoices.record_payment(self.c, int(iid), self.form.get("date"), self.form.get("received"),
+                                        self.form.get("fee"), self.form.get("account"))
+            except (invoices.InvoiceError, ledger.LedgerError) as exc:
+                return self.ok(self.page("入金を登録できません", f'<p><a href="/invoice/{iid}/print">戻る</a></p>', err=str(exc)))
+            self.redirect(f"/invoice/{iid}/print")
+
+        def post_invoice_cancel(self, iid):
+            try:
+                invoices.cancel(self.c, int(iid), self.form.get("reason"))
+            except (invoices.InvoiceError, ledger.LedgerError) as exc:
+                return self.ok(self.page("取り消せません", f'<p><a href="/invoice/{iid}/print">戻る</a></p>', err=str(exc)))
+            self.redirect(f"/invoice/{iid}/print")
+
+        # ---------------------------------------------------------- 請求書PDFの取込
+        UPLOAD_JS = """<script>
+document.querySelectorAll('form.upload').forEach(form=>form.addEventListener('submit',e=>{const input=form.querySelector('input[type=file]');
+const f=input.files[0];const data=form.querySelector('[name=data]');if(!f||data.value)return;e.preventDefault();const r=new FileReader();
+r.onload=()=>{data.value=r.result.split(',')[1];form.querySelector('[name=filename]').value=f.name;form.submit();};r.readAsDataURL(f);}));
+</script>"""
+
+        def get_invoices_pdf(self, err=None):
+            body = f"""<p>請求書のPDF（発行した請求書・受け取った請求書）を読み取って仕訳を作ります。読み取った内容は登録前に確認・修正できます。
+PDFは証憑として保存され、日付・金額・取引先で<a href="/documents">検索</a>できます。</p>
+<form method="post" class="upload">{self.hidden()}<input type="hidden" name="action" value="preview"><input type="hidden" name="data"><input type="hidden" name="filename">
+<div class="row"><input type="file" accept=".pdf" required><button>読み取る</button></div></form>
+<p class="muted">Excelや「Microsoft Print to PDF」などで作った、文字を選択できるPDFが対象です。紙をスキャンしたPDFは読み取れないため、確認画面で手入力してください。</p>{self.UPLOAD_JS}"""
+            self.ok(self.page("請求書PDFから仕訳を作成", body, err=err))
+
+        def post_invoices_pdf(self):
+            data_b64, filename = self.form.get("data", ""), self.form.get("filename", "")
+            try:
+                data = base64.b64decode(data_b64)
+                if not data:
+                    raise invoices.InvoiceError("ファイルを選んでください")
+            except (ValueError, invoices.InvoiceError) as exc:
+                return self.get_invoices_pdf(err=str(exc))
+            if self.form.get("action") == "commit":
+                try:
+                    eid = invoices.entry_from_document(self.c, self.form)
+                    kind = "発行請求書" if self.form.get("direction") == "sales" else "受領請求書"
+                    invoices.add_document(self.c, data, filename, kind, self.form.get("date"),
+                                          invoices._int(self.form.get("total")), self.form.get("partner", "").strip(), eid)
+                except (invoices.InvoiceError, ledger.LedgerError) as exc:
+                    return self.ok(self.pdf_preview(dict(self.form, warnings=[]), data_b64, filename, err=str(exc)))
+                return self.redirect(f"/entry/{eid}?created=1")
+            try:
+                parsed = invoices.read_pdf(self.c, data)
+            except invoices.InvoiceError as exc:
+                parsed = {"direction": "expense", "date": "", "partner": "", "description": "", "subtotal": 0, "tax": 0,
+                          "withholding": 0, "total": 0, "rate": 10, "qualified": False, "warnings": [str(exc)], "text": ""}
+            dup = invoices.find_document_by_hash(self.c, data)
+            if dup:
+                parsed["warnings"].insert(0, f"このPDFは {dup['created_at']} に保存済みです" +
+                                          (f"（仕訳 ID {dup['entry_id']}）" if dup["entry_id"] else ""))
+            self.ok(self.pdf_preview(parsed, data_b64, filename))
+
+        def pdf_preview(self, p, data_b64, filename, err=None):
+            v = lambda k: E(str(p.get(k) if p.get(k) is not None else ""))
+            accts = db.accounts(self.c, True)
+            rev = "".join(f'<option value="{a["code"]}">{E(a["name"])}</option>' for a in accts if a["category"] == "revenue")
+            exp = "".join(f'<option value="{a["code"]}"{" selected" if a["name"] == "外注工賃" else ""}>{E(a["name"])}</option>'
+                          for a in accts if a["category"] in ("expense",) or a["tax_default"] != "NA" and a["category"] == "asset")
+            credit = "".join(f'<option value="{a["code"]}"{" selected" if a["name"] == "未払金" else ""}>{E(a["name"])}</option>'
+                             for a in accts if a["category"] in ("asset", "liability", "equity"))
+            warn = "".join(f"<li>{E(w)}</li>" for w in p.get("warnings", []))
+            direction = p.get("direction", "sales")
+            qualified = p.get("qualified") in (True, "1", "on")
+            body = f"""<p>ファイル: {E(filename)}</p>{f'<div class="msg err"><ul>{warn}</ul></div>' if warn else ''}
+<form method="post">{self.hidden()}<input type="hidden" name="action" value="commit">
+<input type="hidden" name="data" value="{E(data_b64)}"><input type="hidden" name="filename" value="{E(filename)}">
+<div class="row"><label><span><input type="radio" name="direction" value="sales"{' checked' if direction == 'sales' else ''}> 発行した請求書（売上）</span>
+<span><input type="radio" name="direction" value="expense"{' checked' if direction == 'expense' else ''}> 受け取った請求書（経費）</span></label></div>
+<div class="row"><label>日付（計上日）<input type="date" name="date" value="{v('date')}" required></label>
+<label>取引先<input name="partner" value="{v('partner')}" size="36"></label><label>摘要<input name="description" value="{v('description')}" size="40"></label></div>
+<div class="row"><label>小計（税抜）<input type="number" name="subtotal" value="{v('subtotal')}"></label>
+<label>消費税<input type="number" name="tax" value="{v('tax')}"></label><label>税率<select name="rate">{self.options({'10': '10%', '8': '8%', '0': '対象外'}, str(p.get('rate', 10)))}</select></label>
+<label>源泉徴収<input type="number" name="withholding" value="{v('withholding')}"></label><label>合計（ご請求額）<input type="number" name="total" value="{v('total')}"></label></div>
+<div class="row" id="sales_opts"><label>売上の科目<select name="account_sales">{rev}</select></label>
+<span class="muted">仕訳: 売掛金（合計）＋ 事業主貸（源泉所得税）／ 売上高（小計＋消費税）</span></div>
+<div class="row" id="exp_opts"><label>経費の科目<select name="account_expense">{exp}</select></label>
+<label>貸方（支払方法）<select name="credit_account">{credit}</select></label>
+<label><span><input type="checkbox" name="qualified" value="1"{' checked' if qualified else ''}> 適格請求書（登録番号あり）</span></label>
+<span class="muted">支払済みなら貸方を普通預金・事業主借に</span></div>
+<button>この内容で仕訳を登録</button> <a class="btn sub" href="/invoices/pdf">やめる</a></form>
+<details><summary>PDFから読み取った文字</summary><pre style="white-space:pre-wrap">{E(p.get('text', ''))}</pre></details>
+<script>
+function sw(){{const s=document.querySelector('[name=direction]:checked').value==='sales';
+document.getElementById('sales_opts').style.display=s?'':'none';document.getElementById('exp_opts').style.display=s?'none':'';}}
+document.querySelectorAll('[name=direction]').forEach(r=>r.addEventListener('change',sw));sw();
+document.querySelector('form').addEventListener('submit',e=>{{const s=document.querySelector('[name=direction]:checked').value==='sales';
+let a=e.target.querySelector('[name=account]');if(!a){{a=document.createElement('input');a.type='hidden';a.name='account';e.target.appendChild(a);}}
+a.value=e.target.querySelector(s?'[name=account_sales]':'[name=account_expense]').value;}});
+</script>"""
+            return self.page("読み取り内容の確認", body, err=err)
+
+        # ---------------------------------------------------------- 証憑
+        def get_documents(self):
+            q = self.query
+            try:
+                docs = invoices.search_documents(self.c, q.get("from"), q.get("to"), q.get("min") or None,
+                                                 q.get("max") or None, q.get("partner"), q.get("kind"))
+                err = None
+            except ValueError as exc:
+                docs, err = [], str(exc)
+            rows = "".join(
+                f'<tr><td>{E(d["date"])}</td><td>{E(d["kind"])}</td><td>{E(d["partner"])}</td><td class="n">{d["amount"]:,}</td>'
+                f'<td><a href="/document/{d["id"]}" target="_blank">{E(d["filename"])}</a></td>'
+                f'<td>{self.entry_link({"entry_id": d["entry_id"], "entry_no": "仕訳"})}</td><td>{E(d["created_at"])}</td></tr>'
+                for d in docs)
+            body = f"""<form class="row noprint"><label>日付（から）<input type="date" name="from" value="{E(q.get('from', ''))}"></label>
+<label>日付（まで）<input type="date" name="to" value="{E(q.get('to', ''))}"></label>
+<label>金額（以上）<input type="number" name="min" value="{E(q.get('min', ''))}" style="width:110px"></label>
+<label>金額（以下）<input type="number" name="max" value="{E(q.get('max', ''))}" style="width:110px"></label>
+<label>取引先<input name="partner" value="{E(q.get('partner', ''))}"></label><button>検索</button></form>
+<p class="muted">{len(docs)} 件。保存した証憑は変更・削除できません（電子取引データの保存要件：取引年月日・金額・取引先で検索可能）。</p>
+<table><tr><th>日付</th><th>種類</th><th>取引先</th><th class="n">金額</th><th>ファイル</th><th>仕訳</th><th>保存日時</th></tr>{rows}</table>"""
+            self.ok(self.page("証憑の検索", body, err=err))
+
+        def get_document(self, did):
+            row = self.c.execute("SELECT filename, mime, data FROM documents WHERE id = ?", (int(did),)).fetchone()
+            if not row:
+                return self._send(HTTPStatus.NOT_FOUND, "not found", "text/plain")
+            self._send(HTTPStatus.OK, bytes(row["data"]), row["mime"],
+                       {"Content-Disposition": "inline; filename*=UTF-8''" + urllib.parse.quote(row["filename"])})
+
+        def post_entry_attach(self, eid):
+            item = ledger.get_entry(self.c, int(eid))
+            try:
+                if not item:
+                    raise invoices.InvoiceError("仕訳が見つかりません")
+                data = base64.b64decode(self.form.get("data", ""))
+                if not data:
+                    raise invoices.InvoiceError("ファイルを選んでください")
+                filename = self.form.get("filename", "file")
+                mime = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
+                    filename.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+                e = item["entry"]
+                amount = sum(l["amount"] for l in item["lines"] if l["side"] == "D")
+                invoices.add_document(self.c, data, filename, self.form.get("kind") or "領収書等", e["date"], amount,
+                                      e["partner"], e["id"], mime)
+            except (ValueError, invoices.InvoiceError) as exc:
+                return self.ok(self.page("添付できません", f'<p><a href="/entry/{eid}">戻る</a></p>', err=str(exc)))
+            self.redirect(f"/entry/{eid}")
+
+        def get_withholding(self):
+            rows = invoices.withholding_summary(self.c, self.year)
+            trs = "".join(f'<tr><td>事業</td><td>{E(r["partner"])}</td><td class="n">{r["revenue"]:,}</td><td class="n">{r["withholding"]:,}</td></tr>' for r in rows)
+            total = sum(r["withholding"] for r in rows)
+            body = f"""<p class="muted">確定申告書 第二表「所得の内訳（所得税及び復興特別所得税の源泉徴収税額）」に転記する内容です。
+源泉徴収税額は、仕訳の「事業主貸」の行でメモに「源泉」を含むものを集計しています（請求書機能・PDF取込で作成した仕訳は自動でそうなります）。</p>
+<table style="max-width:720px"><tr><th>所得の種類</th><th>支払者の氏名・名称</th><th class="n">収入金額（税込）</th><th class="n">源泉徴収税額</th></tr>{trs}
+<tr class="total"><td colspan="3">合計（申告書の「源泉徴収税額」欄）</td><td class="n">{total:,}</td></tr></table>"""
+            self.ok(self.page("源泉徴収税額の集計", body))
+
         # ---------------------------------------------------------- 取込
         def get_import(self, err=None):
             prompt = importer.claude_prompt(self.c)
@@ -893,6 +1274,17 @@ ROUTES = [
     (r"/export/journal\.csv", "export_journal"),
     (r"/export/history\.csv", "export_history"),
     (r"/import", "import"),
+    (r"/invoices", "invoices"),
+    (r"/invoice/new", "invoice_new"),
+    (r"/invoice/(\d+)", "invoice"),
+    (r"/invoice/(\d+)/print", "invoice_print"),
+    (r"/invoice/(\d+)/paid", "invoice_paid"),
+    (r"/invoice/(\d+)/cancel", "invoice_cancel"),
+    (r"/invoices/pdf", "invoices_pdf"),
+    (r"/documents", "documents"),
+    (r"/document/(\d+)", "document"),
+    (r"/entry/(\d+)/attach", "entry_attach"),
+    (r"/reports/withholding", "withholding"),
     (r"/import/template\.xlsx", "import_template"),
 ]
 
