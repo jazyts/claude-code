@@ -180,6 +180,10 @@ def make_handler(app):
                         f'<button class="sub">終了</button></form>') if app.desktop else ""
             heartbeat = ("<script>setInterval(()=>fetch('/ping').catch(()=>{}),30000);fetch('/ping').catch(()=>{});</script>"
                          if app.desktop else "")
+            # 入力したまま保存せずに画面を離れようとしたら確認する（年度切替・検索は対象外）
+            heartbeat += """<script>(()=>{let dirty=false;document.querySelectorAll('main form[method=post]').forEach(f=>{
+f.addEventListener('input',()=>dirty=true);f.addEventListener('change',()=>dirty=true);f.addEventListener('submit',()=>dirty=false);});
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});})();</script>"""
             return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{E(title)} - {E(name)}</title>
 <style>{CSS}</style></head><body><header><span class="brand">{E(name)}</span>{nav}
@@ -733,7 +737,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <div class="row"><label>消費税の計算方法<select name="tax_method">{self.options(ctax.METHOD_LABELS, method)}</select></label>
 <label>簡易課税の事業区分<select name="simplified_category">{self.options({str(k): v for k, v in ctax.SIMPLIFIED_LABELS.items()}, cat)}</select></label></div>
 <div class="row"><label>青色申告特別控除額<select name="blue_deduction">{self.options({'650000': '65万円（e-Tax または 優良な電子帳簿）', '550000': '55万円', '100000': '10万円'}, ded)}</select></label></div>
-<button>保存</button></form>
+<button>基本設定を保存</button></form>
 <h2>補足</h2><ul class="muted">
 <li>基準期間（2年前）の課税売上高が1,000万円を超える年は消費税の課税事業者です（簡易課税は5,000万円以下で届出が必要）。</li>
 <li>2割特例は免税事業者からインボイス登録で課税事業者になった方向けの経過措置です。基準期間の課税売上高が1,000万円を超える年は使えません。</li>
@@ -764,7 +768,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <div class="row"><label>OneDrive のフォルダ（空欄なら自動: {E(detected or '見つかりません')}）<input name="onedrive_dir" value="{E(od_setting)}" size="50"></label></div>
 <label><input type="checkbox" name="phone_summary" value="1"{chk('phone_summary')}> スマホ用サマリー（売上・経費・未入金など）を OneDrive に自動作成する</label><br>
 <label><input type="checkbox" name="onedrive_backup" value="1"{chk('onedrive_backup')}> 帳簿データのバックアップを OneDrive にも保存する（1日1回・30日分）</label><br>
-<button>保存</button></form>
+<button>OneDrive の設定を保存</button></form>
 <p class="muted">{status}<br>スマホの OneDrive アプリで「aoiro」フォルダの「{maintenance.SUMMARY_NAME}.pdf」を開くと見られます（変更のたびに自動更新）。</p>
 <form method="post" action="/data/summary">{self.hidden()}<button class="sub">今すぐサマリーを作成</button></form>
 <h2>Claude 連携</h2>
