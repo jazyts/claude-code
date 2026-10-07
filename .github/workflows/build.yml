@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  PYTHONUTF8: "1"  # Windows でも日本語を出力できるように
+
 jobs:
   test:
     runs-on: ubuntu-latest
