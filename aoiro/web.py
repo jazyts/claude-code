@@ -769,8 +769,9 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <form method="post" action="/data/summary">{self.hidden()}<button class="sub">今すぐサマリーを作成</button></form>
 <h2>Claude 連携</h2>
 <p>Claude Desktop（パソコン版の Claude アプリ）から、話しかけて仕訳や請求書を操作できるようにします。</p>
+<ol><li><b>先に Claude Desktop を完全に終了</b>する（タスクトレイのアイコンを右クリック→終了）。起動したままだと、終了時に Claude Desktop が設定を上書きして消してしまいます</li>
+<li>下のボタンを押す</li><li>Claude Desktop を起動し、「設定」→「開発者」に aoiro が出ていることを確認する</li></ol>
 <form method="post" action="/claude/install">{self.hidden()}<button>Claude Desktop に連携を設定する</button></form>
-<p class="muted">設定後、Claude Desktop を完全に終了（タスクトレイのアイコンを右クリック→終了）して起動し直してください。設定ファイル: {E(mcp.config_path())}</p>
 <h2>データ</h2>
 <p>帳簿データの場所: <code>{E(os.path.abspath(app.db_path))}</code>（バージョン {E(__version__)}）</p>
 <form method="post" action="/data/backup" class="row">{self.hidden()}<button class="sub">今すぐバックアップ</button></form>
@@ -822,7 +823,8 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
                 done = mcp.install_all(app.db_path)
             except Exception as exc:  # noqa: BLE001 設定ファイルが壊れている場合など
                 return self.get_settings(err=f"設定できませんでした: {exc}")
-            self.get_settings(msg="Claude Desktop に設定しました。Claude Desktop を完全に終了して起動し直してください（" + " / ".join(done) + "）")
+            self.get_settings(msg="Claude Desktop に設定しました（" + " / ".join(done) + "）。Claude Desktop を起動して「設定」→「開発者」に aoiro が出ているか確認してください。"
+                              "出ていない場合は、Claude Desktop を完全に終了してから、もう一度このボタンを押してください。")
 
         # ---------------------------------------------------------- デスクトップアプリ
         def get_favicon(self):

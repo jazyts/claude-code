@@ -60,6 +60,7 @@ def main(argv=None):
         for path in mcp.install_all(args.db):
             print(f"Claude Desktop に登録しました: {path}")
         print(f"帳簿データ: {os.path.abspath(args.db)}")
-        print("Claude Desktop を完全に終了して（タスクトレイのアイコンも「終了」）、起動し直してください。")
+        print("Claude Desktop を起動して「設定」→「開発者」に aoiro が出ているか確認してください。")
+        print("出ていない場合は、Claude Desktop を完全に終了（タスクトレイのアイコンも「終了」）してから、もう一度実行してください。")
     else:
         web.serve(args.db, port=getattr(args, "port", 8765), open_browser=getattr(args, "open", False))
