@@ -1,4 +1,4 @@
-"""コマンドライン: python -m aoiro [serve|backup|verify]"""
+"""コマンドライン: python -m aoiro [serve|backup|verify|mcp|mcp-install]"""
 
 import argparse
 import datetime
@@ -20,6 +20,8 @@ def main(argv=None):
     p = sub.add_parser("backup", help="帳簿データをバックアップする")
     p.add_argument("dest", nargs="?", help="保存先ファイル（既定: backups/日時.sqlite3）")
     sub.add_parser("verify", help="訂正削除履歴の改ざん・不整合を検証する")
+    sub.add_parser("mcp", help="Claude 連携用の MCP サーバーとして動く（Claude Desktop から起動される）")
+    sub.add_parser("mcp-install", help="Claude Desktop に連携を登録する")
     args = parser.parse_args(argv)
 
     if args.command == "backup":
@@ -40,5 +42,14 @@ def main(argv=None):
             print(p)
         print("問題は見つかりませんでした" if not problems else f"{len(problems)} 件の問題があります")
         sys.exit(1 if problems else 0)
+    elif args.command == "mcp":
+        from . import mcp
+        mcp.serve(args.db)
+    elif args.command == "mcp-install":
+        from . import mcp
+        for path in mcp.install_all(args.db):
+            print(f"Claude Desktop に登録しました: {path}")
+        print(f"帳簿データ: {os.path.abspath(args.db)}")
+        print("Claude Desktop を完全に終了して（タスクトレイのアイコンも「終了」）、起動し直してください。")
     else:
         web.serve(args.db, port=getattr(args, "port", 8765), open_browser=getattr(args, "open", False))
