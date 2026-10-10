@@ -148,7 +148,7 @@ class WebSmokeTest(unittest.TestCase):
         self.assertIn("登録しました", body)
         for path in ["/", "/entries", "/entries?partner=A&min=1", "/reports/journal", "/reports/ledger?code=400",
                      "/reports/ledger?all=1", "/reports/trial", "/reports/pl", "/reports/bs", "/reports/monthly",
-                     "/reports/depr", "/reports/ctax", "/opening", "/assets", "/yearend", "/settings",
+                     "/reports/depr", "/reports/ctax", "/reports/itax", "/opening", "/assets", "/yearend", "/settings",
                      "/accounts", "/verify", "/audit", "/entry/1", "/entry/1/edit", "/entry/new"]:
             with self.subTest(path=path):
                 self.assertIn("</html>", self.get(path))

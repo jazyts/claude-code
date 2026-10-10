@@ -17,7 +17,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import __version__, ctax, db, importer, invoices, ledger, maintenance, paths, reports, updater, yearend
+from . import __version__, ctax, db, importer, invoices, itax, ledger, maintenance, paths, reports, updater, yearend
 
 E = html.escape
 LINE_ROWS = 8
@@ -47,7 +47,7 @@ button.danger{background:var(--bad);border-color:var(--bad)}button.sub,.btn.sub{
 NAV = [
     ("/", "ホーム"), ("/entry/new", "仕訳入力"), ("/invoices", "請求書"), ("/entries", "仕訳検索"),
     ("/reports/journal", "仕訳帳"), ("/reports/ledger", "総勘定元帳"), ("/reports/trial", "試算表"),
-    ("/reports/pl", "決算書"), ("/reports/ctax", "消費税"), ("/yearend", "決算整理"),
+    ("/reports/pl", "決算書"), ("/reports/ctax", "消費税"), ("/reports/itax", "税金予測"), ("/yearend", "決算整理"),
     ("/import", "取込"), ("/settings", "設定"),
 ]
 
@@ -522,7 +522,7 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
             pl = reports.profit_loss(self.c, self.year)
             r = lambda no, name, v, cls="": f'<tr class="{cls}"><td>{no}</td><td>{E(name)}</td><td class="n">{yen(v)}</td></tr>'
             sales_note = "、".join(f"{E(n)} {v:,}" for n, v in pl["sales_breakdown"])
-            body = f"""<p class="noprint"><a href="/reports/pl">損益計算書</a> | <a href="/reports/bs">貸借対照表</a> | <a href="/reports/monthly">月別売上・仕入</a> | <a href="/reports/depr">減価償却費の計算</a></p>
+            body = f"""<p class="noprint"><a href="/reports/pl">損益計算書</a> | <a href="/reports/bs">貸借対照表</a> | <a href="/reports/monthly">月別売上・仕入</a> | <a href="/reports/depr">減価償却費の計算</a> | <a href="/reports/itax">税金予測</a></p>
 <p class="muted">青色申告決算書（一般用）1ページ目の番号に合わせています。様式は年分により変わることがあるため、転記時に確認してください。</p>
 <table style="max-width:560px"><tr><th>番号</th><th>科目</th><th class="n">金額（円）</th></tr>
 {r('①', '売上（収入）金額', pl['sales'])}
@@ -601,6 +601,87 @@ const filled=[...document.querySelectorAll('[name=account]')].filter(x=>x.value)
 <p class="muted">あくまで概算です。返還・貸倒れ・中間納付・積上げ計算等は考慮していません。経過措置の割合（80%→50%等）は税制改正で変わる場合があります。
 税込経理では、この納付額を「租税公課」として経費にします（年末に未払計上するか、翌年の納付時に計上）。<a href="/yearend">決算整理</a>から未払計上できます。</p>"""
             self.ok(self.page("消費税（概算）", body))
+
+
+        def get_itax(self, msg=None, err=None):
+            inputs = itax.load_inputs(self.c)
+            f = itax.forecast(self.c, self.year, inputs)
+            r, p = f["result"], f["params"]
+            signed = lambda v: f"{v:,}" if v >= 0 else f"△{-v:,}"
+            fields = "".join(
+                f'<label>{E(label)}<input type="number" name="{k}" value="{inputs[k]}" min="0" style="width:140px"></label>'
+                for k, label, _ in itax.INPUT_FIELDS)
+            rate_opts = "".join(f'<option value="{k}"{" selected" if inputs["biz_tax_rate"] == k else ""}>{E(v)}</option>'
+                                for k, v in itax.BIZ_TAX_RATES.items())
+            ded_rows = "".join(f'<tr><td>{E(n)}</td><td class="n">{yen(a)}</td><td class="n">{yen(b)}</td></tr>'
+                               for n, a, b in r["deductions"])
+            whatif = "".join(
+                f'<tr><td>{E(w["label"])}</td><td class="n"><b>{signed(w["saving"])}</b></td><td class="muted">{E(w["note"])}</td></tr>'
+                for w in f["whatif"])
+            blue = "".join(
+                f'<tr{" class=total" if b["limit"] == p["blue_limit"] else ""}><td>{E(b["label"])}</td><td class="n">{b["taxes"]:,}</td>'
+                f'<td class="n">{signed(b["taxes"] - r["taxes"])}</td></tr>' for b in f["blue_options"])
+            sched = "".join(f'<tr><td>{E(d)}</td><td>{E(label)}</td><td class="n">{signed(v)}</td></tr>'
+                            for d, label, v in f["schedule"])
+            due_label = "納める所得税（確定申告）" if r["income_tax_due"] >= 0 else "戻ってくる所得税（還付）"
+            body = f"""<p class="muted">帳簿の事業所得（青色申告特別控除前 <b>{r['pre_income']:,}</b>円、源泉徴収税額 <b>{r['withholding']:,}</b>円、
+消費税の納付見込み <b>{r['ctax']:,}</b>円）をもとに、{self.year}年分の税金をまとめて見積もります。
+年の途中なら「このまま年末まで売上・経費がなければ」の数字です。</p>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+<div class="card"><div class="muted">税金の合計（4税）</div><div class="big">{r['taxes']:,} 円</div><div class="muted">所得に対して {r['effective_rate']}%</div></div>
+<div class="card"><div class="muted">{due_label}</div><div class="big">{abs(r['income_tax_due']):,} 円</div><div class="muted">年税額 {r['income_tax']:,} − 源泉 {r['withholding']:,}{f" − 予定納税 {r['prepaid']:,}" if r['prepaid'] else ""}</div></div>
+<div class="card"><div class="muted">住民税（翌年6月から4回）</div><div class="big">{r['resident_tax']:,} 円</div><div class="muted">個人事業税 {r['biz_tax']:,} 円（8月・11月）</div></div>
+<div class="card"><div class="muted">税金と保険料を払った後の手取り</div><div class="big">{signed(r['net'])} 円</div><div class="muted">限界税率 所得税{r['marginal_rate']}%＋住民税10%</div></div>
+</div>
+<h2>あと10万円なら、どれが得か</h2>
+<table style="max-width:760px"><tr><th>やること</th><th class="n">税金が減る額</th><th>補足</th></tr>{whatif}</table>
+<p class="muted">経費は「手元のお金が減って税金が少し減る」、共済・iDeCo は「将来の自分に移して税金が減る」、ふるさと納税は「ほぼ同じ額の住民税が減って返礼品が残る」違いがあります。</p>
+
+<div class="grid" style="grid-template-columns:1fr 1fr">
+<div><form method="post" action="/reports/itax">{self.hidden()}<h2>所得控除などの入力</h2>
+<p class="muted">帳簿に出てこない金額を入れると精度が上がります。保存すると年をまたいで引き継がれます。</p>
+<div class="grid" style="grid-template-columns:1fr">{fields}
+<label>個人事業税の税率（業種）<select name="biz_tax_rate">{rate_opts}</select></label></div>
+<p><button class="btn">保存して再計算</button></p></form></div>
+<div><h2>計算の内訳</h2>
+<table><tr><th>所得控除</th><th class="n">所得税</th><th class="n">住民税</th></tr>{ded_rows}
+<tr class="total"><td>控除合計</td><td class="n">{r['deduction_total'][0]:,}</td><td class="n">{r['deduction_total'][1]:,}</td></tr></table>
+<table style="margin-top:12px"><tr><th colspan="2">所得税</th></tr>
+<tr><td>事業所得（控除前 {r['pre_income']:,} − 青色申告特別控除 {r['blue']:,}）</td><td class="n">{r['business_income']:,}</td></tr>
+<tr><td>総所得金額</td><td class="n">{r['total_income']:,}</td></tr>
+<tr><td>課税所得（千円未満切捨て）</td><td class="n">{r['taxable']:,}</td></tr>
+<tr><td>所得税（速算表）</td><td class="n">{r['base_tax']:,}</td></tr>
+<tr><td>復興特別所得税（2.1%）</td><td class="n">{r['reconstruction']:,}</td></tr>
+<tr class="total"><td>所得税及び復興特別所得税の額</td><td class="n">{r['income_tax']:,}</td></tr>
+<tr><td>源泉徴収税額・予定納税額</td><td class="n">△{r['withholding'] + r['prepaid']:,}</td></tr>
+<tr class="total"><td>{due_label}</td><td class="n">{signed(r['income_tax_due'])}</td></tr>
+<tr><th colspan="2">住民税（翌年度）</th></tr>
+<tr><td>課税所得</td><td class="n">{r['resident_taxable']:,}</td></tr>
+<tr><td>所得割 10% − 調整控除 {r['resident_adjust']:,}</td><td class="n">{r['resident_income_part']:,}</td></tr>
+<tr><td>ふるさと納税の税額控除</td><td class="n">△{r['furusato_credit']:,}</td></tr>
+<tr><td>均等割・森林環境税</td><td class="n">{r['resident_flat']:,}</td></tr>
+<tr class="total"><td>住民税</td><td class="n">{r['resident_tax']:,}</td></tr>
+<tr><th colspan="2">個人事業税（翌年度・翌年の経費になる）</th></tr>
+<tr><td>控除前所得 − 事業主控除 290万円</td><td class="n">{r['biz_base']:,}</td></tr>
+<tr class="total"><td>個人事業税（{r['biz_rate']}%）</td><td class="n">{r['biz_tax']:,}</td></tr>
+<tr><th colspan="2">消費税</th></tr>
+<tr class="total"><td><a href="/reports/ctax">消費税・地方消費税（概算）</a></td><td class="n">{r['ctax']:,}</td></tr></table></div></div>
+
+<h2>青色申告特別控除の違い</h2>
+<table style="max-width:640px"><tr><th>控除額</th><th class="n">税金の合計</th><th class="n">今の設定との差</th></tr>{blue}</table>
+<h2>納税スケジュール（目安）</h2>
+<table style="max-width:640px"><tr><th>納期限</th><th>内容</th><th class="n">金額</th></tr>{sched}
+<tr class="total"><td colspan="2">合計（還付は差し引き）</td><td class="n">{signed(sum(v for _, _, v in f['schedule']))}</td></tr></table>
+<p class="muted">概算です。税率・控除額（基礎控除の上乗せ、森林環境税など）は税制改正で変わります。住民税の均等割は自治体により異なり、
+非課税限度額・ふるさと納税の上限・専従者給与・雑損控除・住宅ローン控除・予定納税の減額申請などは考慮していません。申告時は国税庁・自治体の最新情報で確認してください。</p>"""
+            self.ok(self.page("税金予測（所得税・住民税・事業税・消費税）", body, msg=msg, err=err))
+
+        def post_itax(self):
+            try:
+                itax.save_inputs(self.c, self.form)
+            except ValueError:
+                return self.get_itax(err="金額は数字で入力してください")
+            self.get_itax(msg="保存しました")
 
         # ---------------------------------------------------------- 期首残高
         def get_opening(self, err=None, msg=None, values=None):
@@ -1416,6 +1497,7 @@ ROUTES = [
     (r"/reports/monthly", "monthly"),
     (r"/reports/depr", "depr"),
     (r"/reports/ctax", "ctax"),
+    (r"/reports/itax", "itax"),
     (r"/opening", "opening"),
     (r"/assets", "assets"),
     (r"/assets/(\d+)", "assets"),

@@ -10,7 +10,7 @@ import os
 import sys
 import traceback
 
-from . import ctax, db, importer, invoices, ledger, reports, yearend
+from . import ctax, db, importer, invoices, itax, ledger, reports, yearend
 
 PROTOCOL_VERSION = "2025-06-18"
 WEB_URL = "http://127.0.0.1:8765"
@@ -148,6 +148,19 @@ def t_delete_entry(conn, args):
 def t_get_report(conn, args):
     year = _year(conn, args.get("year"))
     kind = args.get("kind")
+    if kind == "tax_forecast":
+        f = itax.forecast(conn, year)
+        r = f["result"]
+        sched = "\n".join(f"  {d} {label}: {v:,}" for d, label, v in f["schedule"])
+        whatif = "\n".join(f"  {w['label']}: 税金 {w['saving']:,}円減（{w['note']}）" for w in f["whatif"])
+        return (f"{year}年分 税金予測（概算）\n控除前所得 {r['pre_income']:,} / 青色申告特別控除 {r['blue']:,} / 総所得 {r['total_income']:,}\n"
+                f"所得控除 合計（所得税）{r['deduction_total'][0]:,}\n課税所得 {r['taxable']:,}（限界税率 {r['marginal_rate']}%）\n"
+                f"所得税及び復興特別所得税 {r['income_tax']:,} − 源泉徴収 {r['withholding']:,} − 予定納税 {r['prepaid']:,} "
+                f"= {'納付' if r['income_tax_due'] >= 0 else '還付'} {abs(r['income_tax_due']):,}\n"
+                f"住民税（翌年度）{r['resident_tax']:,} / 個人事業税 {r['biz_tax']:,} / 消費税 {r['ctax']:,}\n"
+                f"税金合計 {r['taxes']:,}（所得の {r['effective_rate']}%）/ 税金・保険料を払った後の手取り {r['net']:,}\n"
+                f"あと10万円なら:\n{whatif}\n納税スケジュール:\n{sched}\n"
+                "所得控除（社会保険料・配偶者・扶養など）はアプリの「税金予測」画面で入力した値を使います。概算のため申告時は要確認。")
     if kind == "trial_balance":
         rows, d, c = reports.trial_balance(conn, year, args.get("date_to"))
         return f"{year}年 試算表\n" + "\n".join(
@@ -340,9 +353,10 @@ TOOLS = [
       "lines": {"type": "array", "items": LINE_SCHEMA}, "reason": {"type": "string"}}, ["reason"]),
     ("delete_entry", t_delete_entry, "仕訳を削除する（理由必須・履歴が残る）。", {**REF, "reason": {"type": "string"}}, ["reason"]),
     ("get_report", t_get_report, "帳票を取得する: trial_balance(試算表) / profit_loss(損益計算書) / balance_sheet(貸借対照表) / "
-     "monthly(月別売上) / consumption_tax(消費税) / withholding(源泉徴収の集計) / depreciation(減価償却)。",
+     "monthly(月別売上) / consumption_tax(消費税) / withholding(源泉徴収の集計) / depreciation(減価償却) / "
+     "tax_forecast(所得税・住民税・個人事業税・消費税の年税額予測と納税スケジュール)。",
      {**YEAR, "kind": {"type": "string", "enum": ["trial_balance", "profit_loss", "balance_sheet", "monthly",
-                                                  "consumption_tax", "withholding", "depreciation"]},
+                                                  "consumption_tax", "withholding", "depreciation", "tax_forecast"]},
       "date_to": {"type": "string"}}, ["kind"]),
     ("general_ledger", t_general_ledger, "勘定科目ごとの総勘定元帳を取得する。", {**YEAR, "account": {"type": "string"}}, ["account"]),
     ("create_invoice", t_create_invoice,
