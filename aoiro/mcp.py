@@ -21,7 +21,16 @@ INSTRUCTIONS = """個人事業主の青色申告用会計ソフト（複式簿�
 - 源泉徴収された売上は「売掛金（入金予定額）＋ 事業主貸（メモ: 源泉所得税）／ 売上高（税込）」。請求書を作るなら create_invoice を使うと自動でこの仕訳になる。
 - 勘定科目が分からないときは get_overview で一覧を確認する。科目は名前でもコードでも指定できる。
 - 登録・訂正・削除の前に、内容（日付・科目・金額）をユーザーに示して確認を取ること。複数件はまず dry_run=true で検証する。
-- 訂正・削除には理由が必要で、履歴が残る。締めた年は変更できない。"""
+- 訂正・削除には理由が必要で、履歴が残る。締めた年は変更できない。
+
+よくある流れ:
+- 経費を記録: get_overview で科目を確認 → post_entries(dry_run=true) で内容を見せる → 確認後に post_entries。
+- 請求書を出す: create_invoice(dry_run=true) で金額・源泉を見せる → 確認後に create_invoice。入金があれば record_invoice_payment（振込手数料は fee）。
+- 受け取った請求書PDF: read_invoice_pdf で読み取り → 内容を示して確認 → post_invoice_document(direction=expense)。
+- 月次の確認: get_report(kind=monthly) と get_report(kind=trial_balance)。不明な残高は general_ledger で元帳を追う。
+- 年末: get_report(kind=depreciation) → year_end(action=depreciation)、家事按分は year_end(action=home_office)、消費税は get_report(kind=consumption_tax) → year_end(action=consumption_tax_accrual)。
+- 翌年の最初: 前年の決算書4ページ目の期末残高を set_opening_balances に渡す。
+- 分からない金額や科目を推測で埋めない。ユーザーに聞く。"""
 
 
 def _year(conn, value):
